@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { killProcessesIn, Mutex, cleanEnv, sh } from '../src/sh.js';
 
-test('ubija proces zostawiony w katalogu (serwer dev), nie rusza sąsiada o podobnej nazwie', async () => {
+test('terminate processes in the target directory while preserving similarly named neighbors', async () => {
   const root = mkdtempSync(join(tmpdir(), 'kill-'));
   const { mkdirSync } = await import('node:fs');
   mkdirSync(join(root, 'wt'));
@@ -24,7 +24,7 @@ test('ubija proces zostawiony w katalogu (serwer dev), nie rusza sąsiada o podo
   }
 });
 
-test('mutex: operacje po jednej, błąd nie blokuje kolejki', async () => {
+test('mutex serializes operations and errors do not block the queue', async () => {
   const mx = new Mutex();
   const order: string[] = [];
   const job = (id: string, ms: number, fail = false) =>
@@ -38,7 +38,7 @@ test('mutex: operacje po jednej, błąd nie blokuje kolejki', async () => {
   assert.deepEqual(order, ['+a', '-a', '+b', '-b', '+c', '-c']);
 });
 
-test('środowisko sesji bez zmiennych rodzica', () => {
+test('session environment excludes parent session variables', () => {
   process.env.CLAUDECODE = '1';
   process.env.CLAUDE_CODE_SESSION_ID = 'x';
   process.env.CLAUDE_CODE_OAUTH_TOKEN = 't';

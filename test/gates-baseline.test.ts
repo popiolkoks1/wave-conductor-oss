@@ -7,10 +7,10 @@ const rs = [
   { name: 'verify-sound', ok: false, passes: 0, runs: 1, tail: 'tempo' },
 ];
 
-test('bramka czerwona już na main nie blokuje, ale jest widoczna', () => {
+test('legacy baseline failures are visible but do not block', () => {
   assert.equal(allGreen(rs), false);
   assert.equal(allGreen(rs, ['verify-sound']), true);
-  assert.match(describeGates(rs, ['verify-sound']), /◌ verify-sound 0\/1 \(czerwona już na main\)/);
+  assert.match(describeGates(rs, ['verify-sound']), /◌ verify-sound 0\/1 \(already failing on main\)/);
   assert.equal(failureReport(rs, ['verify-sound']), '');
   assert.match(failureReport(rs), /verify-sound/);
 });

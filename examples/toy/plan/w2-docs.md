@@ -1,3 +1,3 @@
-# Tor docs
-Napisz `README.md`: jedno zdanie o projekcie i lista wszystkich funkcji eksportowanych z `calc.js`
-(nazwa, sygnatura, jedno zdanie opisu — w tym zachowanie `multiply` dla nie-liczb). Zacommituj.
+# Track: documentation
+
+Write README.md with a one-sentence project description and a list of all calc.js exports. Include signatures, short descriptions and multiply behavior for non-number arguments. Commit your changes.

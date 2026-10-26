@@ -49,15 +49,15 @@ const allowed = [
   'git merge-tree --write-tree main art/scene-v2',
 ];
 
-for (const c of denied) test(`zakaz: ${c}`, () => assert.ok(checkBash(c), c));
-for (const c of allowed) test(`dozwolone: ${c}`, () => assert.equal(checkBash(c), null, c));
+for (const c of denied) test(`denied: ${c}`, () => assert.ok(checkBash(c), c));
+for (const c of allowed) test(`allowed: ${c}`, () => assert.equal(checkBash(c), null, c));
 
-test('zakazy z manifestu', () => {
+test('manifest restrictions', () => {
   assert.ok(checkBash('node scripts/deploy-production.mjs', ['deploy-production']));
   assert.equal(checkBash('node scripts/build.mjs', ['deploy-production']), null);
 });
 
-test('zapis tylko w korzeniach', () => {
+test('writes stay within allowed roots', () => {
   assert.equal(checkWrite('/r/wt/a/b.ts', ['/r/wt']), null);
   assert.ok(checkWrite('/r/wt-other/b.ts', ['/r/wt']));
   assert.ok(checkWrite('/r/wt/../main/b.ts', ['/r/wt']));
@@ -68,7 +68,7 @@ test('zapis tylko w korzeniach', () => {
 
 import { checkDenyPath } from '../src/policy.js';
 
-test('git stash zakazany (wspólny stos worktree), list/show dozwolone', () => {
+test('git stash is shared across worktrees; only list/show are allowed', () => {
   assert.ok(checkBash('git stash'));
   assert.ok(checkBash('git stash push -m x'));
   assert.ok(checkBash('git stash pop'));
@@ -76,7 +76,7 @@ test('git stash zakazany (wspólny stos worktree), list/show dozwolone', () => {
   assert.equal(checkBash('git stash show -p'), null);
 });
 
-test('zamrożone ścieżki względem worktree (ze spacją w ścieżce)', () => {
+test('frozen paths are relative to the worktree, including paths with spaces', () => {
   const wt = '/projects/sample project/ui';
   const deny = ['math/', 'docs/BOOK_EVENTS.md', 'frontend/packages/', 'src/types/'];
   assert.ok(checkDenyPath(`${wt}/math/games/x.py`, wt, deny));
@@ -89,7 +89,7 @@ test('zamrożone ścieżki względem worktree (ze spacją w ścieżce)', () => {
   assert.ok(checkTool('Edit', { file_path: `${wt}/math/a.py` }, [wt], [], deny, wt));
 });
 
-test('opcje globalne gita nie omijają zakazów (git -C … push)', () => {
+test('Git global options cannot bypass command restrictions', () => {
   for (const c of [
     'git -C "/projects/sample project/audio" push -u origin feat/sound-v4',
     "git -C '/x y' reset --hard HEAD",

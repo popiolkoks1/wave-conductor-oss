@@ -50,4 +50,4 @@ These are Git pathspecs. The conductor checks committed changes after tasks and 
 
 `conduct status plan.yaml` prints counts, result branch, task reasons, estimated costs and a next action. `conduct watch plan.yaml --from 0` streams notifications. `conduct stop plan.yaml` stops background execution; `conduct start plan.yaml --resume-last` resumes it.
 
-REPORT.md and DECYZJE.md preserve evidence and decisions; sessions/*.jsonl contains agent logs. Review deferred tasks and baseline warnings before accepting results.
+REPORT.md and DECISIONS.md preserve evidence and decisions; sessions/*.jsonl contains agent logs. Review deferred tasks and baseline warnings before accepting results.

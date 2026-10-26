@@ -32,7 +32,7 @@ The demo creates a temporary Git repository, integrates a prebuilt task through 
 | Maintenance across independent modules | Tasks that all rewrite the same files |
 | Features with explicit acceptance criteria | Work whose correctness has no objective check |
 
-Execution currently uses the Claude Agent SDK. Runtime messages and the detailed manifest reference remain partly Polish. The [English guide](docs/QUICKSTART.md) covers the main workflow and new controls.
+Execution currently uses the Claude Agent SDK. The [quickstart guide](docs/QUICKSTART.md) covers the main workflow and verification controls.
 
 ## Start with your project
 
@@ -76,15 +76,15 @@ bin/conduct stop /path/to/plan/conductor.yaml
 bin/conduct start /path/to/plan/conductor.yaml --resume-last
 ```
 
-See [the manifest reference (Polish)](docs/MANIFEST.md) for dependencies between tasks, variants, model selection, budgets, gates, notifications and optional visual review. The [optional Claude skill](skill/SKILL.md) must be configured with the path to your checkout; no personal installation paths are assumed.
+See [the manifest reference](docs/MANIFEST.md) for dependencies between tasks, variants, model selection, budgets, gates, notifications and optional visual review. The [optional Claude skill](skill/SKILL.md) must be configured with the path to your checkout; no personal installation paths are assumed.
 
 ## How it works
 
 1. Measure regression gates on the main branch.
 2. Start independent tasks in isolated worktrees, with configurable parallelism, setup commands, models and budgets.
 3. Let the supervisor answer task questions from the plan, retry failing gates, and defer tasks that cannot pass. Required tasks stop the run on failure.
-4. Integrate successful branches, verify the result, then advance the local main branch with `--ff-only`. Push is opt-in through `policy.push`.
-5. Save `REPORT.md`, `DECYZJE.md` (decisions), logs, notifications and resumable state under `stateDir`.
+4. Integrate successful branches, verify the result, then advance the result branch (or local main for legacy plans) with `--ff-only`. Push is opt-in through `policy.push`.
+5. Save `REPORT.md`, `DECISIONS.md` (decisions), logs, notifications and resumable state under `stateDir`.
 
 The supervisor makes decisions autonomously. Use explicit acceptance criteria and a disposable checkout for the first run. Sessions execute code and shell commands with your account's permissions; command filters are guardrails, not a security sandbox. Review untrusted plans and dependencies before running. Run/session budgets estimate SDK costs and are not billing guarantees. Smoke tests invoke real agent sessions and may incur charges.
 

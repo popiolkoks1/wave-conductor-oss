@@ -8,15 +8,12 @@ export interface GateResult {
   ok: boolean;
   passes: number;
   runs: number;
-  /** ogon wyjścia ostatniego czerwonego przebiegu — idzie do sesji naprawczej */
+  /** Tail of the last failed attempt, supplied to the repair session. */
   tail: string;
   failures?: string[];
 }
 
-/**
- * Bramki liczy dyrygent, nie sesja: sesja może się pomylić co do własnego wyniku.
- * Szum (np. testy wizualne 22–43 porażki na tych samych plikach) tłumi `runs`/`mustPass`.
- */
+/** The conductor evaluates gates independently of session claims. runs/mustPass can tolerate noisy checks. */
 export async function runGates(gates: Gate[], root: string, baseline: Record<string, string[]> = {}): Promise<GateResult[]> {
   const results: GateResult[] = [];
   for (const g of gates) {
@@ -48,20 +45,17 @@ export async function runGates(gates: Gate[], root: string, baseline: Record<str
   return results;
 }
 
-/**
- * Bramka czerwona już na czystym main przed falą nie może blokować torów — inaczej każdy tor
- * zostałby odłożony za cudzy błąd. W tej fali jest tylko informacyjna (i trafia do raportu).
- */
+/** Legacy baseline failures are informational for the wave, preventing existing defects from blocking every track. Failure-ID comparison provides stricter regression checking. */
 export const allGreen = (rs: GateResult[], baselineRed: string[] = []) => rs.every((r) => r.ok || baselineRed.includes(r.name));
 
 export function describeGates(rs: GateResult[], baselineRed: string[] = []): string {
-  if (rs.length === 0) return '(brak bramek)';
-  return rs.map((r) => `${r.ok ? '✓' : baselineRed.includes(r.name) ? '◌' : '✗'} ${r.name} ${r.passes}/${r.runs}${!r.ok && baselineRed.includes(r.name) ? ' (czerwona już na main)' : ''}`).join(', ');
+  if (rs.length === 0) return '(no gates)';
+  return rs.map((r) => `${r.ok ? '✓' : baselineRed.includes(r.name) ? '◌' : '✗'} ${r.name} ${r.passes}/${r.runs}${!r.ok && baselineRed.includes(r.name) ? ' (already failing on main)' : ''}`).join(', ');
 }
 
 export function failureReport(rs: GateResult[], baselineRed: string[] = []): string {
   return rs
     .filter((r) => !r.ok && !baselineRed.includes(r.name))
-    .map((r) => `### Bramka „${r.name}” czerwona (${r.passes}/${r.runs} zielonych)\n\`\`\`\n${r.tail}\n\`\`\``)
+    .map((r) => `### Gate “${r.name}” failed (${r.passes}/${r.runs} passing)\n\`\`\`\n${r.tail}\n\`\`\``)
     .join('\n\n');
 }

@@ -24,12 +24,12 @@ const WAIT_STEP_MIN = 10;
 
 export class Conductor {
   private sup: Supervisor;
-  /** operacje na wspólnym .git (worktree add/remove, gałęzie) po jednej naraz */
+  /** Serialize operations on shared .git state, including worktrees and branches. */
   private repoLock = new Mutex();
   private warned = new Set<string>();
-  /** wspólny limit równoległych torów: bieżąca fala + tory startujące wcześniej (needs) */
+  /** Shared concurrency limit for current-wave and early-start tracks. */
   private slots: Semaphore;
-  /** tory w toku w tym procesie — fala nie startuje ich drugi raz, tylko czeka na tę samą obietnicę */
+  /** Reuse one in-flight promise per track to prevent duplicate execution. */
   private inflight = new Map<string, Promise<void>>();
 
   constructor(
@@ -43,7 +43,7 @@ export class Conductor {
 
   private log = (s: string) => this.store.log(s);
 
-  /** Problem środowiska: jedno powiadomienie na rodzaj, nie co próbę. */
+  /** Notify once per environment problem rather than on every retry. */
   private warnOnce(key: string, msg: string) {
     if (this.warned.has(key)) return;
     this.warned.add(key);
@@ -52,19 +52,19 @@ export class Conductor {
 
   async run(): Promise<void> {
     mkdirSync(this.m.worktreeRoot, { recursive: true });
-    // Wznowienie po padnięciu procesu: sesje poprzedniego procesu mogły przeżyć jako sieroty i dalej pisać w worktree.
+    // Terminate orphaned sessions that might still write into worktrees after a conductor crash.
     for (const t of Object.values(this.store.state.tracks)) {
       if (t.status !== 'running' || !existsSync(t.worktree)) continue;
       const k = await killProcessesIn(t.worktree);
-      if (k.length) this.log(`[${t.id}] wznowienie: ubito ${k.length} osierocony(ch) proces(ów) poprzedniego dyrygenta`);
+      if (k.length) this.log(`[${t.id}] resume: terminated ${k.length} orphaned processes from the previous conductor`);
     }
     for (const w of this.m.waves) if (this.store.wave(w.id).status === 'merging') await killProcessesIn(this.integrationDir(w));
-    // Zaległe sprzątanie: fala scalona, a jej worktree zostały (przerwanie w trakcie sprzątania, zablokowane pliki na Windowsie).
+    // Finish cleanup interrupted by a crash or locked files on Windows.
     for (const w of this.m.waves) {
       if (this.store.wave(w.id).status !== 'merged') continue;
       const dirs = [this.integrationDir(w), ...Object.values(this.store.state.tracks).filter((t) => t.wave === w.id).map((t) => t.worktree)];
       if (dirs.some((d) => existsSync(d))) {
-        this.log(`sprzątanie zaległe po fali ${w.id}`);
+        this.log(`pending cleanup after wave ${w.id}`);
         await this.cleanup(w);
       }
     }
@@ -73,7 +73,7 @@ export class Conductor {
       for (const wave of this.m.waves) {
         if (this.store.wave(wave.id).status === 'merged') continue;
         this.checkBudget();
-        this.log(`══ FALA ${wave.id} ══`);
+        this.log(`══ WAVE ${wave.id} ══`);
         const ws = this.store.wave(wave.id);
         ws.startedAt ??= new Date().toISOString();
         await this.runWave(wave);
@@ -84,7 +84,7 @@ export class Conductor {
       this.store.state.outcome = 'done';
     } catch (e: any) {
       this.store.state.outcome = 'stopped';
-      this.store.state.stopReason = e instanceof StopRun ? e.message : `błąd dyrygenta: ${e?.stack ?? e}`;
+      this.store.state.stopReason = e instanceof StopRun ? e.message : `conductor error: ${e?.stack ?? e}`;
       this.log(`■ STOP: ${this.store.state.stopReason}`);
     } finally {
       clearInterval(beat);
@@ -99,7 +99,7 @@ export class Conductor {
     const ts = Object.values(s.tracks).filter((t) => t.wave === cur?.id);
     const n = (st: string) => ts.filter((t) => t.status === st).length;
     const done = s.waves.filter((w) => w.status === 'merged').length;
-    return `trwa fala ${cur?.id ?? '—'} (${done}/${s.waves.length} gotowe): ${n('running')} w toku, ${n('green')} zielone, ${n('deferred')} odłożone · $${s.costUsd.toFixed(0)}`;
+    return `current wave ${cur?.id ?? '—'} (${done}/${s.waves.length} complete): ${n('running')} running, ${n('green')} passing, ${n('deferred')} deferred · $${s.costUsd.toFixed(0)}`;
   }
 
   private waveLine(wave: Wave): string {
@@ -109,24 +109,24 @@ export class Conductor {
     const merged = ts.filter((t) => t.status === 'merged').length;
     const deferred = ts.filter((t) => t.status === 'deferred').map((t) => t.id);
     const idx = s.waves.findIndex((w) => w.id === wave.id) + 1;
-    const rv = ws.review ? `, recenzent ${ws.review.stars}★${ws.review.page ? ` — pokaz: ${ws.review.page}` : ''}` : '';
-    return `fala ${wave.id} (${idx}/${s.waves.length}): scalono ${merged}/${wave.tracks.length}${deferred.length ? `, odłożone: ${deferred.join(', ')}` : ''}${ws.baselineRed?.length ? `, bramki czerwone już na main: ${ws.baselineRed.join(', ')}` : ''}${rv}`;
+    const rv = ws.review ? `, reviewer ${ws.review.stars}★${ws.review.page ? ` — showcase: ${ws.review.page}` : ''}` : '';
+    return `wave ${wave.id} (${idx}/${s.waves.length}): integrated ${merged}/${wave.tracks.length}${deferred.length ? `, deferred: ${deferred.join(', ')}` : ''}${ws.baselineRed?.length ? `, gates already failing on main: ${ws.baselineRed.join(', ')}` : ''}${rv}`;
   }
 
   private checkBudget() {
     const cap = this.m.maxRunBudgetUsd;
-    if (cap && this.store.state.costUsd >= cap) throw new StopRun(`przekroczony budżet przebiegu $${cap} (wydano ~$${this.store.state.costUsd.toFixed(2)})`);
+    if (cap && this.store.state.costUsd >= cap) throw new StopRun(`run budget exceeded $${cap} (spent ~$${this.store.state.costUsd.toFixed(2)})`);
   }
 
-  // ───────────────────────────── fala ─────────────────────────────
+  // Wave execution.
 
-  /** `early` = tory startujące przed końcem poprzedniej fali: porty przesunięte, żeby nie gryzły się z bieżącą falą. */
+  /** Offset early-start ports to avoid conflicts with the current wave. */
   private units(wave: Wave, early = false): Unit[] {
     const out: Unit[] = [];
     let i = 0;
     for (const t of wave.tracks) {
       for (const v of t.variants ?? [undefined]) {
-        // wczesne tory dwóch kolejnych fal mogą działać naraz — każda fala ma własną dziesiątkę portów
+        // Early tracks from adjacent waves may overlap; reserve a separate block of ten ports for each wave.
         const port = early ? this.m.basePort + this.m.earlyPortOffset + (this.m.waves.indexOf(wave) % 4) * 10 + i : (t.port ?? this.m.basePort + i);
         out.push({ key: v ? `${t.id}--${v.id}` : t.id, wave, track: t, variant: v, port });
         i++;
@@ -149,7 +149,7 @@ export class Conductor {
     return this.store.state.tracks[u.key];
   }
 
-  /** Tor w toku — jedna obietnica na tor w tym procesie; wspólny limit równoległości. */
+  /** Run each track once per process under the shared concurrency limit. */
   private launch(u: Unit, base: string): Promise<void> {
     const have = this.inflight.get(u.key);
     if (have) return have;
@@ -159,7 +159,7 @@ export class Conductor {
       .run(() => this.runUnit(u, base))
       .catch((e) => {
         if (e instanceof StopRun) throw e;
-        this.defer(this.store.track(u.key), `wyjątek dyrygenta: ${String(e?.message ?? e).slice(0, 500)}`);
+        this.defer(this.store.track(u.key), `conductor exception: ${String(e?.message ?? e).slice(0, 500)}`);
       })
       .finally(async () => {
         this.inflight.delete(u.key);
@@ -167,15 +167,15 @@ export class Conductor {
           await killProcessesIn(this.store.track(u.key).worktree);
           await killPort(u.port);
         }
-        void this.tryEarly(u.wave).catch((e) => this.log(`wczesny start: ${String(e?.message ?? e).slice(0, 300)}`));
+        void this.tryEarly(u.wave).catch((e) => this.log(`early start: ${String(e?.message ?? e).slice(0, 300)}`));
       });
     this.inflight.set(u.key, p);
     return p;
   }
 
-  // ───────────────────────────── wczesny start (needs) ─────────────────────────────
+  // Early start based on dependencies.
 
-  /** Stan toru (z wariantami) z punktu widzenia zależności: gotowy = zielony/scalony i rozstrzygnięty. */
+  /** A dependency is ready when its track passes or is integrated and any variants are resolved. */
   private needState(id: string): { ready: boolean; branch?: string; merged: boolean } {
     const all = Object.values(this.store.state.tracks).filter((t) => t.id === id || t.id.startsWith(`${id}--`));
     if (all.length === 0) return { ready: false, merged: false };
@@ -183,12 +183,12 @@ export class Conductor {
     if (merged) return { ready: true, merged: true };
     if (all.some((t) => t.status === 'pending' || t.status === 'running')) return { ready: false, merged: false };
     const green = all.filter((t) => t.status === 'green');
-    // warianty: rozstrzygnięte, gdy został jeden zielony (reszta przegrała albo odpadła)
+    // Variants are resolved when exactly one passing candidate remains.
     if (green.length === 1) return { ready: true, branch: green[0].branch, merged: false };
     return { ready: false, merged: false };
   }
 
-  /** Startuje tory NASTĘPNEJ fali, których wszystkie `needs` są już gotowe — nie czekając na koniec bieżącej. */
+  /** Start eligible tracks from the next wave without waiting for the current wave to finish. */
   private async tryEarly(current: Wave) {
     const idx = this.m.waves.indexOf(current);
     const next = this.m.waves[idx + 1];
@@ -206,7 +206,7 @@ export class Conductor {
         const branches = states.filter((s) => !s.merged && s.branch).map((s) => s.branch!);
         base = await this.prestart(u.key, branches);
         if (!base) {
-          this.warnOnce(`early-${u.key}`, `wczesny start ${u.key} niemożliwy (konflikt zależności) — poczeka na falę ${next.id}`);
+          this.warnOnce(`early-${u.key}`, `early start ${u.key} unavailable (dependency conflict) — waiting for wave ${next.id}`);
           continue;
         }
       }
@@ -215,12 +215,12 @@ export class Conductor {
       st.port ??= u.port;
       st.baseSha = base;
       this.store.save();
-      this.log(`[${u.key}] ⚡ wczesny start — zależności gotowe: ${needs.join(', ')}`);
+      this.log(`[${u.key}] ⚡ early start — dependencies ready: ${needs.join(', ')}`);
       void this.launch(u, base);
     }
   }
 
-  /** Gałąź `prestart/<tor>` = main + zielone (jeszcze niescalone) gałęzie zależności. Zwraca SHA albo undefined przy konflikcie. */
+  /** Build prestart/<track> from main plus passing dependency branches. Return undefined on conflict. */
   private prestart(key: string, branches: string[]): Promise<string | undefined> {
     return this.repoLock.run(() => prestartBranch(this.m.repo, this.m.worktreeRoot, this.m.mainBranch, key, branches, (l) => this.log(l)));
   }
@@ -231,29 +231,29 @@ export class Conductor {
     const units = this.units(wave);
     for (const u of units) this.ensureState(u);
 
-    // Bazowy pomiar bramek na czystym main, zanim ruszy jakikolwiek tor.
+    // Measure baseline gates on clean main before starting any tracks.
     const iwt = this.integrationDir(wave);
     if (ws.status === 'pending') {
       await this.ensureIntegration(wave);
       const gates = baselineGatesOf(wave);
       if (gates.length) {
-        this.log(`[${wave.id}] pomiar bazowy bramek na ${this.m.mainBranch}`);
+        this.log(`[${wave.id}] baseline gate measurement on ${this.m.mainBranch}`);
         const base0 = await runGates(gates, iwt);
         ws.baselineRed = base0.filter((r) => !r.ok && !gates.find((g) => g.name === r.name)?.failuresFile).map((r) => r.name);
         ws.baselineFailures = Object.fromEntries(base0.filter((r) => r.failures).map((r) => [r.name, r.failures!]));
-        if (ws.baselineRed.length) this.log(`[${wave.id}] czerwone już na ${this.m.mainBranch} (w tej fali tylko informacyjne): ${ws.baselineRed.join(', ')}`);
+        if (ws.baselineRed.length) this.log(`[${wave.id}] already failing on ${this.m.mainBranch} (informational for this wave): ${ws.baselineRed.join(', ')}`);
       }
       await killProcessesIn(iwt);
     }
     ws.status = 'tracks';
     this.store.save();
 
-    // Tory następnej fali, których zależności są gotowe już teraz (np. po wznowieniu), startują od razu.
-    await this.tryEarly(wave).catch((e) => this.log(`wczesny start: ${String(e?.message ?? e).slice(0, 300)}`));
-    // Kolejność startu = kolejność w manifeście; tory tej fali mają pierwszeństwo przed wczesnymi (kolejka semafora).
+    // Start next-wave tracks immediately when their dependencies are already ready, including after resume.
+    await this.tryEarly(wave).catch((e) => this.log(`early start: ${String(e?.message ?? e).slice(0, 300)}`));
+    // Start in manifest order; current-wave tracks enter the semaphore queue before early tracks.
     await Promise.all(units.map((u) => this.launch(u, u.track.base ?? this.store.track(u.key).baseSha ?? base)));
 
-    // Warianty: sędzia wybiera jeden z zielonych, reszta zostaje na gałęziach.
+    // Choose one passing variant; retain alternative branches.
     for (const t of wave.tracks.filter((t) => t.variants)) {
       const green = t.variants!.map((v) => this.store.track(`${t.id}--${v.id}`)).filter((s) => s.status === 'green');
       if (green.length >= 2) {
@@ -262,7 +262,7 @@ export class Conductor {
         if (visual) {
           for (const s of green) {
             const sh0 = await takeShowcase(this.m.review!, s.worktree, this.reviewPort(), join(this.store.dir, 'showcase', s.id));
-            this.log(`[${s.id}] pokaz dla sędziego: ${sh0.pngs.length} zrzutów${sh0.pngs.length ? '' : ` — ${sh0.log.slice(-200)}`}`);
+            this.log(`[${s.id}] showcase for judge: ${sh0.pngs.length} screenshots${sh0.pngs.length ? '' : ` — ${sh0.log.slice(-200)}`}`);
             shots.set(s.id, sh0.pngs);
           }
         }
@@ -271,31 +271,31 @@ export class Conductor {
           t.judgeCriteria ?? '',
           green.map((s) => ({ id: s.variant!, branch: s.branch, worktree: s.worktree, gates: s.reason ?? '', summary: s.summary ?? '', shots: shots.get(s.id) })),
         );
-        for (const s of green) if (s.variant !== r.winner) { s.status = 'lost-variant'; s.reason = `przegrał z ${r.winner}: ${r.reason}`; }
-        this.log(`[${t.id}] wygrał wariant ${r.winner}`);
+        for (const s of green) if (s.variant !== r.winner) { s.status = 'lost-variant'; s.reason = `lost to ${r.winner}: ${r.reason}`; }
+        this.log(`[${t.id}] winning variant ${r.winner}`);
       }
       this.store.save();
     }
-    await this.tryEarly(wave).catch((e) => this.log(`wczesny start: ${String(e?.message ?? e).slice(0, 300)}`));
+    await this.tryEarly(wave).catch((e) => this.log(`early start: ${String(e?.message ?? e).slice(0, 300)}`));
 
-    // Tor wystartował wcześniej na zależnościach, które ostatecznie nie weszły do main — nie wolno go scalić (wniósłby je tylnymi drzwiami).
+    // Do not integrate an early track whose dependencies were excluded from main; it would reintroduce them.
     for (const u of units) {
       const st = this.store.track(u.key);
       if (!st.early || st.status !== 'green') continue;
       const missing = (u.track.needs ?? []).filter((n) => !this.needState(n).merged);
-      if (missing.length) this.defer(st, `wystartował wcześniej na ${missing.join(', ')}, a te tory nie weszły do ${this.m.mainBranch} — gałąź zostaje do ręcznego przejrzenia`);
+      if (missing.length) this.defer(st, `started early from ${missing.join(', ')}, but those tracks were not integrated into ${this.m.mainBranch} — branch retained for manual review`);
     }
 
     for (const t of wave.tracks.filter((t) => t.required)) {
       const mine = units.filter((u) => u.track === t).map((u) => this.store.track(u.key));
       if (!mine.some((x) => x.status === 'green' || x.status === 'merged'))
-        throw new StopRun(`tor wymagany ${t.id} nie przeszedł: ${mine.map((x) => x.reason).join(' | ').slice(0, 300)}`);
+        throw new StopRun(`required track ${t.id} failed: ${mine.map((x) => x.reason).join(' | ').slice(0, 300)}`);
     }
 
     const ready = units.map((u) => this.store.track(u.key)).filter((s) => s.status === 'green');
     if (ready.length === 0) {
       ws.status = 'merged';
-      ws.note = 'żaden tor nie był zielony — nic nie scalono';
+      ws.note = 'no tracks passed — nothing integrated';
       this.store.save();
       this.log(`[${wave.id}] ${ws.note}`);
     } else {
@@ -304,23 +304,23 @@ export class Conductor {
     await this.cleanup(wave);
   }
 
-  // ───────────────────────────── tor ─────────────────────────────
+  // Track execution.
 
   private preamble(u: Unit, st: TrackState, base: string, gates: Gate[], baselineRed: string[]): string {
     const ctx = this.m.context.map((c) => `- ${join(this.m.planDir, c)}`).join('\n');
-    return `# Tryb autonomiczny (dyrygent fal)
-Pracujesz BEZ człowieka. Właściciel oddał decyzje; odpowiada za niego nadzorca.
-- Tor: **${u.track.id}**${u.variant ? ` — wariant **${u.variant.id}**: ${u.variant.note}` : ''} (fala ${u.wave.id}).
-- Twój worktree: \`${st.worktree}\`, gałąź \`${st.branch}\`, baza \`${base.slice(0, 10)}\`. Inne tory pracują równolegle w innych katalogach — nie dotykaj ich.${this.m.sessionCwd ? `\n- Sesja startuje w \`${this.m.sessionCwd}\` (hooki projektu), ale CAŁĄ pracę robisz w worktree: \`cd "${st.worktree}"\` (cytuj ścieżkę).` : ''}
-- Jeśli prompt planu każe pracować w innym katalogu, na innej gałęzi albo porcie (np. w checkoutcie z \`${this.m.mainBranch}\`) — pracujesz w TYM worktree, na TEJ gałęzi i TYM porcie. \`git push\` gałęzi robi dyrygent po zielonych bramkach.${[...(this.m.policy.denyPaths ?? []), ...(u.track.denyPaths ?? [])].length ? `\n- Zapis do tych ścieżek jest zablokowany: ${[...(this.m.policy.denyPaths ?? []), ...(u.track.denyPaths ?? [])].join(', ')}.` : ''}
-- Serwer dev, jeśli go potrzebujesz: port **${u.port}**, uruchamiany W TLE (nigdy na pierwszym planie — sesja dłuższa niż ${this.m.sessionTimeoutMin} min jest przerywana). Dyrygent ubije go po Twoim torze.
-- Najpierw przeczytaj kontekst planu:\n${ctx || '- (brak)'}
-- Pytanie albo decyzja (także „pokaż właścicielowi”, STOP-KONCEPT, wybór A/B) → narzędzie **AskUserQuestion**; odpowie nadzorca, a Ty działasz dalej według odpowiedzi. Nie zadawaj pytań w tekście i nie kończ sesji, żeby czekać.
-- Commituj na swojej gałęzi małymi commitami, stagując ścieżki JAWNIE. NIE pushuj, NIE scalaj do gałęzi głównej, NIE przełączaj gałęzi, NIE kasuj gałęzi ani worktree — to robi dyrygent. Zakazane polecenia zostaną odrzucone.
-- Bramki, które dyrygent odpali po Tobie w tym worktree: ${gates.map((g) => `\`${g.run}\``).join(', ') || '(brak)'}. Uruchom je sam przed końcem.${baselineRed.length ? `\n- Te bramki były czerwone już na czystym main, więc Ciebie nie blokują (nie naprawiaj ich, chyba że to Twoje zadanie): ${baselineRed.join(', ')}.` : ''}
-- Operacje nieodwracalne (publikacja, wysyłka na zewnątrz) pomijasz i zapisujesz jako otwarte.
-- Szybkość: kilka niezależnych, długich zadań (symulacje wariantów, serie generacji, pomiary w kilku widokach) uruchamiaj RÓWNOLEGLE — w tle albo podagentami (narzędzie Agent) — zamiast jedno po drugim.
-- Na końcu: krótkie podsumowanie — co zrobione, co zostało otwarte. Worktree ma być czysty (wszystko zacommitowane).
+    return `# Autonomous mode (wave conductor)
+Work without human interaction. The owner delegated decisions to the supervisor.
+- Track: **${u.track.id}**${u.variant ? ` — variant **${u.variant.id}**: ${u.variant.note}` : ''} (wave ${u.wave.id}).
+- Your worktree: \`${st.worktree}\`, branch \`${st.branch}\`, base \`${base.slice(0, 10)}\`. Other tracks run concurrently in other directories; do not modify them.${this.m.sessionCwd ? `\n- The session starts in \`${this.m.sessionCwd}\` (project hooks), but perform ALL work in the worktree: \`cd "${st.worktree}"\` (quote the path).` : ''}
+- If the plan asks you to use another directory, branch or port (such as the checkout of \`${this.m.mainBranch}\`), use THIS worktree, THIS branch and THIS port. \`git push\` is handled by the conductor after gates pass.${[...(this.m.policy.denyPaths ?? []), ...(u.track.denyPaths ?? [])].length ? `\n- Writing to these paths is blocked: ${[...(this.m.policy.denyPaths ?? []), ...(u.track.denyPaths ?? [])].join(', ')}.` : ''}
+- If you need a dev server, use port **${u.port}**, run it in the BACKGROUND (never in foreground — a session longer than ${this.m.sessionTimeoutMin} min is interrupted). The conductor terminates it after your track.
+- Read the plan context first:\n${ctx || '- (none)'}
+- For questions or decisions (including owner review, concept approval and A/B choices), use **AskUserQuestion**; the supervisor answers, and you continue accordingly. Do not ask questions in plain text or end the session to wait.
+- Make small commits on your branch, staging paths EXPLICITLY. Do not push, merge into the main branch, switch branches or delete branches/worktrees; the conductor handles these operations. Forbidden commands will be denied.
+- Gates the conductor will run in your worktree: ${gates.map((g) => `\`${g.run}\``).join(', ') || '(none)'}. Run them before finishing.${baselineRed.length ? `\n- These gates already failed on clean main and do not block you (do not fix them unless that is your task): ${baselineRed.join(', ')}.` : ''}
+- Skip irreversible operations (publishing, external delivery) and record them as open issues.
+- For speed, run independent long tasks (variant simulations, generation batches, measurements across views) concurrently, in the background or with subagents (Agent tool).
+- Finish with a short summary of completed work and open issues. Leave a clean worktree with all work committed. Write all summaries and open issues in English.
 
 ---
 
@@ -349,7 +349,7 @@ Pracujesz BEZ człowieka. Właściciel oddał decyzje; odpowiada za niego nadzor
   private async runUnit(u: Unit, base: string) {
     const st = this.store.track(u.key);
     if (['green', 'deferred', 'merged', 'lost-variant'].includes(st.status)) return;
-    if (this.m.maxRunBudgetUsd && this.store.state.costUsd >= this.m.maxRunBudgetUsd) return this.defer(st, 'budżet przebiegu wyczerpany przed startem toru');
+    if (this.m.maxRunBudgetUsd && this.store.state.costUsd >= this.m.maxRunBudgetUsd) return this.defer(st, 'run budget exhausted before track startup');
     if (u.track.done) return this.adoptDone(st);
     const ws = this.store.wave(u.wave.id);
     const baselineRed = ws.baselineRed ?? [];
@@ -363,7 +363,7 @@ Pracujesz BEZ człowieka. Właściciel oddał decyzje; odpowiada za niego nadzor
       if (fresh || !st.baseSha) st.baseSha = base;
     } catch (e: any) {
       if (e instanceof StopRun) throw e;
-      return this.defer(st, `nie udało się założyć worktree: ${String(e.message).slice(0, 300)}`);
+      return this.defer(st, `could not create worktree: ${String(e.message).slice(0, 300)}`);
     }
 
     const task = trackPrompt(this.m, u.track);
@@ -387,17 +387,17 @@ Pracujesz BEZ człowieka. Właściciel oddał decyzje; odpowiada za niego nadzor
     st.status = 'running';
     this.store.save();
     this.log(`[${u.key}] ${resumed ? 'wznowienie' : 'start'} (${st.branch})`);
-    if (resumed) await talk('Dyrygent został wznowiony po przerwie. Kontynuuj zadanie od miejsca, w którym przerwałeś.');
+    if (resumed) await talk('The conductor resumed after an interruption. Continue the task from where you left off.');
     else await talk(this.preamble(u, st, base, gates, baselineRed) + task, true);
 
-    // Pętla „czy sesja naprawdę skończyła?” — odpowiada nadzorca, nie człowiek.
+    // Ask the supervisor whether the session actually finished, rather than asking a human.
     const settle = async () => {
       for (let i = 0; i < this.m.maxFollowUps; i++) {
         const r = await this.sup.review(u.key, task, out.text);
         st.summary = r.summary;
         if (r.status === 'done') return;
-        if (r.status === 'blocked') this.log(`[${u.key}] zablokowana: ${r.reply.slice(0, 200)}`);
-        this.log(`[${u.key}] nadzorca odpowiada i wznawia sesję`);
+        if (r.status === 'blocked') this.log(`[${u.key}] blocked: ${r.reply.slice(0, 200)}`);
+        this.log(`[${u.key}] supervisor responds and resumes the session`);
         await talk(r.reply);
       }
     };
@@ -408,9 +408,9 @@ Pracujesz BEZ człowieka. Właściciel oddał decyzje; odpowiada za niego nadzor
       await killProcessesIn(st.worktree);
       const dirty = (await sh('git status --porcelain', st.worktree)).out.trim();
       if (dirty) {
-        if (attempt >= this.m.maxFixAttempts) return this.defer(st, `worktree nadal brudny po ${attempt} próbach:\n${dirty.slice(0, 500)}`);
-        this.log(`[${u.key}] niezacommitowane zmiany — sesja ma je zacommitować`);
-        await talk(`Dyrygent: w worktree zostały niezacommitowane zmiany:\n${dirty.slice(0, 2000)}\nZacommituj to, co jest częścią pracy (ścieżki jawnie), a śmieci dopisz do .gitignore albo usuń. Worktree ma być czysty.`);
+        if (attempt >= this.m.maxFixAttempts) return this.defer(st, `worktree still dirty after ${attempt} attempts:\n${dirty.slice(0, 500)}`);
+        this.log(`[${u.key}] uncommitted changes — asking the session to commit them`);
+        await talk(`Conductor: the worktree has uncommitted changes:\n${dirty.slice(0, 2000)}\nCommit relevant work (stage explicit paths) and ignore or remove generated files. Leave the worktree clean.`);
         continue;
       }
       const results = await runGates(gates, st.worktree, ws.baselineFailures);
@@ -419,9 +419,9 @@ Pracujesz BEZ człowieka. Właściciel oddał decyzje; odpowiada za niego nadzor
       st.reason = describeGates(results, baselineRed);
       this.store.save();
       if (allGreen(results, baselineRed)) break;
-      if (attempt >= this.m.maxFixAttempts) return this.defer(st, `bramki czerwone po ${attempt} poprawkach: ${st.reason}`);
-      this.log(`[${u.key}] bramki: ${st.reason} — poprawka ${attempt + 1}/${this.m.maxFixAttempts}`);
-      await talk(`Dyrygent uruchomił bramki w Twoim worktree i część jest czerwona. Napraw przyczynę (nie osłabiaj bramki), zacommituj i uruchom je ponownie.\n\n${failureReport(results, baselineRed)}`);
+      if (attempt >= this.m.maxFixAttempts) return this.defer(st, `gates failing after ${attempt} fix attempts: ${st.reason}`);
+      this.log(`[${u.key}] gates: ${st.reason} — fix ${attempt + 1}/${this.m.maxFixAttempts}`);
+      await talk(`The conductor ran the gates in your worktree and some failed. Fix the cause without weakening the gates, commit and rerun them.\n\n${failureReport(results, baselineRed)}`);
       await settle();
     }
 
@@ -429,15 +429,15 @@ Pracujesz BEZ człowieka. Właściciel oddał decyzje; odpowiada za niego nadzor
     st.status = 'green';
     st.finishedAt = new Date().toISOString();
     this.store.save();
-    this.log(`[${u.key}] ZIELONY — ${st.commits} commitów, ${st.reason}`);
+    this.log(`[${u.key}] PASSING — ${st.commits} commits, ${st.reason}`);
     if (this.m.policy.push) {
-      // kopia zapasowa gałęzi toru na origin (plan tego wymaga); nigdy --force
+      // Back up track branches on origin when enabled; never force-push.
       const p = await sh(`git push -u origin ${q(st.branch)}`, st.worktree, 600);
-      this.log(`[${u.key}] push ${st.branch}: ${p.code === 0 ? 'ok' : 'NIEUDANY — ' + p.out.trim().slice(-200)}`);
+      this.log(`[${u.key}] push ${st.branch}: ${p.code === 0 ? 'ok' : 'FAILED — ' + p.out.trim().slice(-200)}`);
     }
   }
 
-  /** Tor zrobiony poza dyrygentem: gałąź musi istnieć (lokalnie albo na origin); idzie prosto do scalania. */
+  /** A pre-completed track must exist locally or on origin and goes directly to integration. */
   private async adoptDone(st: TrackState) {
     const has = (ref: string) => gitOk(this.m.repo, `rev-parse --verify -q ${q(ref)}`);
     await this.repoLock.run(async () => {
@@ -445,13 +445,13 @@ Pracujesz BEZ człowieka. Właściciel oddał decyzje; odpowiada za niego nadzor
         if (await has(`refs/remotes/origin/${st.branch}`)) await git(this.m.repo, `branch ${q(st.branch)} ${q(`origin/${st.branch}`)}`);
       }
     });
-    if (!(await has(`refs/heads/${st.branch}`))) return this.defer(st, `tor oznaczony done, ale gałęzi ${st.branch} nie ma ani lokalnie, ani na origin`);
+    if (!(await has(`refs/heads/${st.branch}`))) return this.defer(st, `track marked done, but branch ${st.branch} does not exist locally or on origin`);
     st.ownBranch = false;
     st.commits = Number(await git(this.m.repo, `rev-list --count ${q(this.m.mainBranch)}..${q(st.branch)}`));
     st.status = 'green';
-    st.reason = 'zrobiony przed przebiegiem (done)';
+    st.reason = 'completed before the run (done)';
     this.store.save();
-    this.log(`[${st.id}] gotowy przed przebiegiem — ${st.branch}, ${st.commits} commitów`);
+    this.log(`[${st.id}] completed before the run — ${st.branch}, ${st.commits} commits`);
   }
 
   private reviewPort = () => this.m.review?.port ?? this.m.mergePort + 5;
@@ -461,33 +461,29 @@ Pracujesz BEZ człowieka. Właściciel oddał decyzje; odpowiada za niego nadzor
     st.reason = reason;
     st.finishedAt ??= new Date().toISOString();
     this.store.save();
-    this.log(`[${st.id}] ODŁOŻONY: ${reason.slice(0, 300)}`);
+    this.log(`[${st.id}] DEFERRED: ${reason.slice(0, 300)}`);
   }
 
-  /** Czeka na miejsce na dysku (inne tory mogą je zwolnić), potem się poddaje. */
+  /** Wait for disk space that other tracks may release, then stop after the configured limit. */
   private async waitForDisk(what: string) {
     for (let waited = 0; ; waited += WAIT_STEP_MIN) {
       const gb = await freeGb(this.m.worktreeRoot);
       if (gb >= this.m.minFreeGb) return;
-      if (waited >= this.m.mainBusyWaitMin) throw new StopRun(`za mało miejsca na dysku (${gb.toFixed(1)} GB < ${this.m.minFreeGb} GB) — ${what}`);
-      this.warnOnce('disk', `mało miejsca na dysku: ${gb.toFixed(1)} GB — czekam, zanim założę kolejny worktree`);
-      this.log(`dysk: ${gb.toFixed(1)} GB wolnego < ${this.m.minFreeGb} GB — czekam ${WAIT_STEP_MIN} min (${what})`);
+      if (waited >= this.m.mainBusyWaitMin) throw new StopRun(`insufficient disk space (${gb.toFixed(1)} GB < ${this.m.minFreeGb} GB) — ${what}`);
+      this.warnOnce('disk', `low disk space: ${gb.toFixed(1)} GB — waiting before creating another worktree`);
+      this.log(`disk: ${gb.toFixed(1)} GB free < ${this.m.minFreeGb} GB — waiting ${WAIT_STEP_MIN} min (${what})`);
       await sleep(WAIT_STEP_MIN * 60_000);
     }
   }
 
-  /** Czy `dir` jest zarejestrowanym worktree na gałęzi `branch`? */
+  /** Check whether dir is a registered worktree on the expected branch. */
   private async isWorktreeOn(dir: string, branch: string) {
     if (!existsSync(join(dir, '.git'))) return false;
     const r = await sh('git rev-parse --abbrev-ref HEAD', dir);
     return r.code === 0 && r.out.trim() === branch;
   }
 
-  /**
-   * Zakłada worktree toru. Odporne na:
-   * - katalog po poprzednim przebiegu, który nie jest już worktree (odkładany na bok, nie kasowany),
-   * - gałąź o tej nazwie z dawnej pracy: scalona → usuwana i zakładana od nowa; nie scalona → nowa nazwa -r2, -r3…
-   */
+  /** Create a track worktree. Move stale directories aside. Recreate previously merged branches; use -r2, -r3, etc. for names occupied by unmerged work. */
   private async ensureWorktree(st: TrackState, base: string) {
     if (await this.isWorktreeOn(st.worktree, st.branch)) {
       if (!st.setupDone) await this.runSetup(st.worktree, () => (st.setupDone = true));
@@ -498,19 +494,19 @@ Pracujesz BEZ człowieka. Właściciel oddał decyzje; odpowiada za niego nadzor
       if (existsSync(st.worktree)) {
         const aside = `${st.worktree}.stale-${Date.now()}`;
         renameSync(st.worktree, aside);
-        this.log(`[${st.id}] katalog worktree nie pasował — odłożony na bok jako ${aside}`);
+        this.log(`[${st.id}] worktree directory did not match — moved aside to ${aside}`);
         await sh('git worktree prune', this.m.repo);
       }
       const has = (b: string) => gitOk(this.m.repo, `rev-parse --verify -q ${q(`refs/heads/${b}`)}`);
       if (!st.ownBranch && (await has(st.branch))) {
         if (await gitOk(this.m.repo, `merge-base --is-ancestor ${q(st.branch)} ${q(this.m.mainBranch)}`)) {
           const r = await sh(`git branch -d ${q(st.branch)}`, this.m.repo);
-          this.log(`[${st.id}] stara gałąź ${st.branch} była już w ${this.m.mainBranch} — ${r.code === 0 ? 'usunięta' : 'zostaje (zajęta przez inny worktree)'}`);
+          this.log(`[${st.id}] old branch ${st.branch} was already in ${this.m.mainBranch} — ${r.code === 0 ? 'deleted' : 'retained (in use by another worktree)'}`);
         }
         let n = 2;
         const orig = st.branch;
         while (await has(st.branch)) st.branch = `${orig}-r${n++}`;
-        if (st.branch !== orig) this.log(`[${st.id}] gałąź ${orig} zajęta cudzą pracą — tor idzie na ${st.branch}`);
+        if (st.branch !== orig) this.log(`[${st.id}] branch ${orig} contains other work — track uses ${st.branch}`);
       }
       if (st.ownBranch && (await has(st.branch))) await git(this.m.repo, `worktree add ${q(st.worktree)} ${q(st.branch)}`);
       else await git(this.m.repo, `worktree add -b ${q(st.branch)} ${q(st.worktree)} ${base}`);
@@ -525,18 +521,18 @@ Pracujesz BEZ człowieka. Właściciel oddał decyzje; odpowiada za niego nadzor
     for (const cmd of this.m.setup) {
       let r = await sh(cmd, dir, 1800);
       if (r.code !== 0) {
-        // Równoległe setupy (pnpm install, turbo) potrafią się chwilowo pogryźć o wspólne pliki — jedna powtórka przed odłożeniem toru.
-        this.log(`setup w ${dir} nie przeszedł (${r.code}) — powtarzam za 30 s: ${r.out.trim().split('\n').slice(-2).join(' ').slice(0, 200)}`);
+        // Concurrent setup commands may contend over shared files; retry once before deferring the track.
+        this.log(`setup in ${dir} failed (${r.code}) — retrying in 30 s: ${r.out.trim().split('\n').slice(-2).join(' ').slice(0, 200)}`);
         await sleep(30_000);
         r = await sh(cmd, dir, 1800);
       }
-      if (r.code !== 0) throw new Error(`setup → ${r.code}: ${r.out.trim().split('\n').slice(-6).join(' | ').slice(0, 600)}\n(polecenie: ${cmd.slice(0, 200)})`);
+      if (r.code !== 0) throw new Error(`setup → ${r.code}: ${r.out.trim().split('\n').slice(-6).join(' | ').slice(0, 600)}\n(command: ${cmd.slice(0, 200)})`);
     }
     done();
     this.store.save();
   }
 
-  // ───────────────────────────── scalanie ─────────────────────────────
+  // Integration.
 
   private integrationDir = (wave: Wave) => join(this.m.worktreeRoot, `_integration-${wave.id}`);
 
@@ -548,11 +544,11 @@ Pracujesz BEZ człowieka. Właściciel oddał decyzje; odpowiada za niego nadzor
       if (!ws.integrationSetupDone) await this.runSetup(iwt, () => (ws.integrationSetupDone = true));
       return;
     }
-    await this.waitForDisk(`integracja ${wave.id}`);
+    await this.waitForDisk(`integration ${wave.id}`);
     await this.repoLock.run(async () => {
       if (existsSync(iwt)) renameSync(iwt, `${iwt}.stale-${Date.now()}`);
       await sh('git worktree prune', this.m.repo);
-      // Integracja zawsze od aktualnego main; stara gałąź integracji o tej nazwie jest przestawiana (-B).
+      // Always base integration on current main; reset an old integration branch with -B.
       await git(this.m.repo, `worktree add -B ${q(ib)} ${q(iwt)} ${q(this.m.mainBranch)}`);
       ws.integrationSetupDone = false;
       this.store.save();
@@ -575,7 +571,7 @@ Pracujesz BEZ człowieka. Właściciel oddał decyzje; odpowiada za niego nadzor
 
     let sessionId: string | undefined = ws.mergeSessionId;
     const common = {
-      ...this.baseSpec(`scalanie-${wave.id}`, iwt, null, this.m.models.merge ?? this.m.models.track),
+      ...this.baseSpec(`integration-${wave.id}`, iwt, null, this.m.models.merge ?? this.m.models.track),
       onSessionId: (id: string) => {
         ws.mergeSessionId = id;
         this.store.save();
@@ -586,15 +582,15 @@ Pracujesz BEZ człowieka. Właściciel oddał decyzje; odpowiada za niego nadzor
       sessionId = out.sessionId ?? sessionId;
       return out;
     };
-    const rules = (list: TrackState[]) => `# Scalanie fali ${wave.id} (tryb autonomiczny)
-Jesteś w worktree \`${iwt}\` na gałęzi \`${ib}\` (odbitej od \`${main}\`). Człowieka nie ma; pytania → AskUserQuestion (nadzorca).
-Gałęzie do scalenia (zielone tory): ${list.map((s) => `\`${s.branch}\``).join(', ')}.
-Scalaj je do BIEŻĄCEJ gałęzi (\`git merge --no-ff <gałąź>\`), rozwiązuj konflikty tak, żeby zachować intencję OBU stron, commituj.
-Do \`${main}\` NIE scalasz i nic nie pushujesz — dyrygent przewinie \`${main}\` sam po zielonych bramkach. Gałęzi nie kasujesz.
-Kroki planu, które przewijają lub pushują \`${main}\`, usuwają worktree, ubijają serwery torów albo zakładają worktree NASTĘPNEJ fali — robi dyrygent; pomiń je.
-Jeśli plan każe pracować w checkoutcie \`${main}\` albo na jego porcie — pracujesz w TYM worktree integracji, a swój serwer dev stawiasz na porcie **${this.m.mergePort}** (w tle).${this.m.sessionCwd ? ` Sesja startuje w \`${this.m.sessionCwd}\`, pracę robisz w \`cd "${iwt}"\`.` : ''}
-Kolizje, których git nie widzi (plik skasowany po jednej stronie, import po drugiej), łapią dopiero testy — uruchom je.${baselineRed.length ? `\nBramki czerwone już na ${main} przed falą (nie blokują): ${baselineRed.join(', ')}.` : ''}
-Na końcu: worktree czysty, krótki raport scalenia.
+    const rules = (list: TrackState[]) => `# Wave integration ${wave.id} (autonomous mode)
+You are in worktree \`${iwt}\` on branch \`${ib}\` (based on \`${main}\`). No human is available; direct questions to AskUserQuestion (supervisor).
+Branches to integrate (passing tracks): ${list.map((s) => `\`${s.branch}\``).join(', ')}.
+Merge them into the CURRENT branch (\`git merge --no-ff <branch>\`), resolve conflicts preserving the intent of BOTH sides, and commit.
+Do not merge into \`${main}\` or push — the conductor advances \`${main}\` after gates pass. Do not delete branches.
+Plan steps that advance or push \`${main}\`, remove worktrees, terminate track servers or create worktrees for the NEXT wave are handled by the conductor; skip them.
+If the plan asks you to work in the checkout of \`${main}\` or on its port, use THIS integration worktree and start your dev server on port **${this.m.mergePort}** (in background).${this.m.sessionCwd ? ` The session starts in \`${this.m.sessionCwd}\`, do your work in \`cd "${iwt}"\`.` : ''}
+Run tests to catch conflicts Git cannot detect (such as a deleted file still imported elsewhere).${baselineRed.length ? `\nGates already failing on ${main} before the wave (non-blocking): ${baselineRed.join(', ')}.` : ''}
+Finish with a clean worktree and a short integration report in English.
 
 `;
 
@@ -611,28 +607,28 @@ Na końcu: worktree czysty, krótki raport scalenia.
       results.push(...await protectedChanges(iwt, this.store.state.startMain, this.m.policy.protectedPaths ?? []));
       await killProcessesIn(iwt);
       const problems = [
-        miss.length ? `Nie scalone gałęzie: ${miss.map((s) => s.branch).join(', ')}.` : '',
-        merging ? 'Merge jest w toku (MERGE_HEAD) — dokończ go.' : '',
-        dirty ? `Niezacommitowane zmiany:\n${dirty.slice(0, 1500)}` : '',
+        miss.length ? `Unmerged branches: ${miss.map((s) => s.branch).join(', ')}.` : '',
+        merging ? 'A merge is in progress (MERGE_HEAD); finish it.' : '',
+        dirty ? `Uncommitted changes:\n${dirty.slice(0, 1500)}` : '',
         results.length && !allGreen(results, baselineRed) ? failureReport(results, baselineRed) : '',
       ].filter(Boolean);
       return { problems, results };
     };
-    /** Scala jedną gałąź; konflikt oddaje sesji. Zwraca, czy gałąź jest w integracji i nic nie wisi. */
+    /** Merge one branch, asking a session to resolve conflicts before checking integration. */
     const mergeOne = async (s: TrackState) => {
       const r = await sh(`git merge --no-ff --no-edit ${q(s.branch)}`, iwt);
-      if (r.code === 0) return this.log(`[${wave.id}] scalono ${s.branch}`);
-      this.log(`[${wave.id}] konflikt przy ${s.branch} — rozwiązuje sesja`);
-      await talk((sessionId ? '' : rules(ready)) + `Trwa \`git merge ${s.branch}\` i są konflikty:\n\`\`\`\n${r.out.slice(-3000)}\n\`\`\`\nRozwiąż je i dokończ TEN merge commitem. Pozostałe gałęzie scali dyrygent.`);
+      if (r.code === 0) return this.log(`[${wave.id}] integrated ${s.branch}`);
+      this.log(`[${wave.id}] conflict in ${s.branch} — session will resolve it`);
+      await talk((sessionId ? '' : rules(ready)) + `In progress: \`git merge ${s.branch}\` with conflicts:\n\`\`\`\n${r.out.slice(-3000)}\n\`\`\`\nResolve them and finish THIS merge with a commit. The conductor will merge remaining branches.`);
     };
 
-    // 1. Zwykłe scalanie: prompt fali albo dyrygent + sesja od konfliktów, potem poprawki.
+    // First attempt: normal merge using the wave prompt or conductor, followed by repairs.
     const custom = mergePromptOf(this.m, wave);
     if (resumingMerge) {
-      this.log(`[${wave.id}] wznowienie sesji scalającej`);
-      await talk('Dyrygent został wznowiony po przerwie. Kontynuuj scalanie od miejsca, w którym przerwałeś (sprawdź git status i MERGE_HEAD).');
+      this.log(`[${wave.id}] resuming integration session`);
+      await talk('The conductor resumed after an interruption. Continue integration from where you left off (check git status and MERGE_HEAD).');
     } else if (custom) {
-      this.log(`[${wave.id}] scalanie według promptu fali`);
+      this.log(`[${wave.id}] integrating according to the wave prompt`);
       await talk(rules(ready) + custom);
     } else {
       for (const s of await notIn(ready)) await mergeOne(s);
@@ -641,7 +637,7 @@ Na końcu: worktree czysty, krótki raport scalenia.
     for (let attempt = 0; ; attempt++) {
       const { problems, results } = await inspect(ready);
       if (problems.length === 0) {
-        ws.note = `bramki integracji: ${describeGates(results, baselineRed)}`;
+        ws.note = `integration gates: ${describeGates(results, baselineRed)}`;
         ok = true;
         break;
       }
@@ -649,13 +645,13 @@ Na końcu: worktree czysty, krótki raport scalenia.
         ws.note = problems.join('\n').slice(0, 1500);
         break;
       }
-      this.log(`[${wave.id}] integracja czerwona — poprawka ${attempt + 1}/${this.m.maxFixAttempts}`);
-      await talk((sessionId ? '' : rules(ready)) + `Dyrygent sprawdził integrację i są problemy. Napraw je (nie osłabiaj bramek), zacommituj.\n\n${problems.join('\n\n')}`);
+      this.log(`[${wave.id}] integration failed — fix ${attempt + 1}/${this.m.maxFixAttempts}`);
+      await talk((sessionId ? '' : rules(ready)) + `The conductor found integration problems. Fix them without weakening gates and commit.\n\n${problems.join('\n\n')}`);
     }
 
-    // 2. Awaryjnie: od nowa po jednym torze; tor, który psuje bramki razem z resztą, jest odkładany (zamiast stopu całego przebiegu).
+    // Fallback: integrate one track at a time, deferring tracks that break combined checks.
     if (!ok) {
-      this.log(`[${wave.id}] scalanie całości nie przeszło — awaryjnie po jednym torze`);
+      this.log(`[${wave.id}] combined integration failed — retrying one track at a time`);
       await killProcessesIn(iwt);
       await sh('git merge --abort', iwt);
       await git(iwt, `reset --hard ${q(main)}`);
@@ -671,42 +667,42 @@ Na końcu: worktree czysty, krótki raport scalenia.
           merged.push(s);
           continue;
         }
-        this.log(`[${wave.id}] ${s.id} psuje integrację z resztą — odkładam`);
+        this.log(`[${wave.id}] ${s.id} breaks integration with other tracks — deferring`);
         await sh('git merge --abort', iwt);
         await git(iwt, `reset --hard ${before}`);
-        this.defer(s, `koliduje z resztą fali przy scalaniu: ${problems.join(' ').slice(0, 400)}`);
+        this.defer(s, `conflicts with other tracks during integration: ${problems.join(' ').slice(0, 400)}`);
         ws.collided.push(s.id);
       }
       ready = merged;
       if (ready.length === 0) {
         ws.status = 'merged';
-        ws.note = 'żaden tor nie przeszedł integracji — main bez zmian';
+        ws.note = 'no tracks passed integration — main unchanged';
         this.store.save();
         this.log(`[${wave.id}] ${ws.note}`);
         return;
       }
       const { results } = await inspect(ready);
-      ws.note = `awaryjnie po jednym; bramki integracji: ${describeGates(results, baselineRed)}`;
+      ws.note = `fallback integration one track at a time; integration gates: ${describeGates(results, baselineRed)}`;
     }
 
-    // 3. Niezależny recenzent: pokaz zrobiony przez dyrygenta, ocena po obrazie; „fix” = jedna runda poprawek, która nie może zepsuć bramek.
+    // Independent screenshot review; one repair round must preserve passing gates.
     if (this.m.review && this.m.review.wave !== false) {
       const fix = ok
         ? async (issues: string[]) => {
             const before = await git(iwt, 'rev-parse HEAD');
-            this.log(`[${wave.id}] recenzent: ${issues.length} usterek — runda poprawek sesji scalającej`);
+            this.log(`[${wave.id}] reviewer: ${issues.length} issues — integration session will attempt fixes`);
             await talk(
               (sessionId ? '' : rules(ready)) +
-                `Niezależny recenzent obejrzał pokaz projektu po scaleniu tej fali i wskazał usterki. Popraw te, które da się poprawić w tej fali bez przebudowy ` +
-                `(zaślepki, ucięte lub nieczytelne elementy, regresje względem poprzedniej fali, AI-look w tym, co fala zmieniła), zacommituj. ` +
-                `Resztę zapisz w raporcie scalenia jako otwartą — nie zaczynaj pracy kolejnej fali.\n\n${issues.map((i) => `- ${i}`).join('\n')}`,
+                `An independent reviewer inspected the showcase after integration and identified issues. Fix those addressable within this wave without a redesign ` +
+                `(placeholders, clipped or unreadable elements, regressions and generic visual artifacts in changed areas), then commit. ` +
+                `Record remaining issues in the integration report; do not start work from the next wave.\n\n${issues.map((i) => `- ${i}`).join('\n')}`,
             );
             for (let a = 0; a < 2; a++) {
               const { problems } = await inspect(ready);
               if (problems.length === 0) return true;
-              if (a === 0) await talk(`Po poprawkach recenzenta integracja jest czerwona — napraw (nie osłabiaj bramek), zacommituj.\n\n${problems.join('\n\n')}`);
+              if (a === 0) await talk(`Integration checks failed after reviewer fixes. Repair without weakening gates and commit.\n\n${problems.join('\n\n')}`);
             }
-            this.log(`[${wave.id}] poprawki recenzenta psują integrację — cofam je, fala idzie bez nich`);
+            this.log(`[${wave.id}] reviewer fixes break integration — reverting them and proceeding without them`);
             await sh('git merge --abort', iwt);
             await git(iwt, `reset --hard ${q(before)}`);
             return false;
@@ -715,7 +711,7 @@ Na końcu: worktree czysty, krótki raport scalenia.
       try {
         await this.waveReview(wave, iwt, fix);
       } catch (e: any) {
-        this.log(`[${wave.id}] recenzja nie wyszła: ${String(e?.message ?? e).slice(0, 300)}`);
+        this.log(`[${wave.id}] review failed: ${String(e?.message ?? e).slice(0, 300)}`);
       }
     }
 
@@ -723,10 +719,10 @@ Na końcu: worktree czysty, krótki raport scalenia.
     for (const s of ready) s.status = 'merged';
     ws.status = 'merged';
     this.store.save();
-    this.log(`[${wave.id}] SCALONE → ${main} = ${ws.mergeCommit?.slice(0, 10)}`);
+    this.log(`[${wave.id}] INTEGRATED → ${main} = ${ws.mergeCommit?.slice(0, 10)}`);
   }
 
-  /** Pokaz integracji + ocena recenzenta + strona „przed / po”. */
+  /** Capture integration screenshots, review them and write a before/after page. */
   private async waveReview(wave: Wave, iwt: string, fix?: (issues: string[]) => Promise<boolean>) {
     const ws = this.store.wave(wave.id);
     const idx = this.m.waves.indexOf(wave);
@@ -736,71 +732,68 @@ Na końcu: worktree czysty, krótki raport scalenia.
     const take = () => takeShowcase(this.m.review!, iwt, this.reviewPort(), out);
     let shots = await take();
     if (shots.pngs.length === 0) {
-      ws.review = { stars: 0, verdict: 'ok', summary: `pokaz się nie udał — brak zrzutów (${shots.log.slice(-160).replace(/\n/g, ' ')})`, issues: [] };
+      ws.review = { stars: 0, verdict: 'ok', summary: `showcase failed — no screenshots (${shots.log.slice(-160).replace(/\n/g, ' ')})`, issues: [] };
       this.store.save();
-      this.log(`[${wave.id}] recenzja pominięta: ${ws.review.summary}`);
+      this.log(`[${wave.id}] review skipped: ${ws.review.summary}`);
       return;
     }
     let rv = await this.sup.reviewWave(wave.id, shots.pngs, prev?.pngs ?? []);
-    this.log(`[${wave.id}] recenzent: ${rv.stars}★ ${rv.verdict} — ${rv.summary.slice(0, 200)}`);
+    this.log(`[${wave.id}] reviewer: ${rv.stars}★ ${rv.verdict} — ${rv.summary.slice(0, 200)}`);
     if (rv.verdict === 'fix' && fix && (await fix(rv.issues))) {
       shots = await take();
       rv = await this.sup.reviewWave(wave.id, shots.pngs, prev?.pngs ?? []);
-      this.log(`[${wave.id}] recenzent po poprawkach: ${rv.stars}★ ${rv.verdict}`);
+      this.log(`[${wave.id}] reviewer after fixes: ${rv.stars}★ ${rv.verdict}`);
     }
-    const page = writeShowcasePage(join(this.store.dir, 'showcase', `${wave.id}.html`), `${this.m.name} — pokaz po fali ${wave.id}`, shots, prev, rv);
+    const page = writeShowcasePage(join(this.store.dir, 'showcase', `${wave.id}.html`), `${this.m.name} — showcase after wave ${wave.id}`, shots, prev, rv);
     ws.review = { ...rv, page };
     ws.showcaseDir = shots.dir;
     this.store.save();
   }
 
-  /**
-   * Przewija main --ff-only w katalogu repo. Jeśli katalog stoi na innej gałęzi albo ma zmiany,
-   * które blokują przewinięcie (np. ktoś akurat w nim pracuje) — czeka, zamiast psuć cudzą pracę.
-   */
+  /** Fast-forward main in its checkout. Wait when another branch or local changes block advancement, preserving other work. */
   private async advanceMain(wave: Wave, iwt: string, ib: string, gates: Gate[], baselineRed: string[]) {
     const ws: WaveState = this.store.wave(wave.id);
     const main = this.m.mainBranch;
     for (let waited = 0; ; waited += WAIT_STEP_MIN) {
       const head = (await sh('git rev-parse --abbrev-ref HEAD', this.m.repo)).out.trim();
-      let why = head !== main ? `katalog repo stoi na „${head}”, nie na ${main}` : '';
+      let why = head !== main ? `repository checkout is on „${head}”, rather than ${main}` : '';
       if (!why) {
         const r = await sh(`git merge --ff-only ${q(ib)}`, this.m.repo);
         if (r.code === 0) break;
         const diverged = !(await gitOk(this.m.repo, `merge-base --is-ancestor ${q(main)} ${q(ib)}`));
         if (diverged) {
-          // Ktoś ruszył main w trakcie fali: dociągnij go do integracji i sprawdź bramki jeszcze raz.
-          this.log(`[${wave.id}] ${main} się ruszył — dociągam do integracji`);
+          // If main advanced during the wave, merge it into integration and rerun checks.
+          this.log(`[${wave.id}] ${main} advanced — merging into integration`);
           const mm = await sh(`git merge --no-edit ${q(main)}`, iwt);
           const again = await runGates(gates, iwt, ws.baselineFailures);
           again.push(...await protectedChanges(iwt, this.store.state.startMain, this.m.policy.protectedPaths ?? []));
           await killProcessesIn(iwt);
           if (mm.code !== 0 || !allGreen(again, baselineRed)) {
             await sh('git merge --abort', iwt);
-            throw new StopRun(`${main} ruszył się w trakcie fali ${wave.id} i integracja z nim nie przechodzi — ${main} nietknięty, praca na ${ib}`);
+            throw new StopRun(`${main} advanced during wave ${wave.id} and integration with it fails — ${main} unchanged; work retained on ${ib}`);
           }
           continue;
         }
-        why = `przewinięcie ${main} blokują lokalne zmiany w ${this.m.repo}: ${r.out.trim().slice(-200)}`;
+        why = `fast-forwarding ${main} is blocked by local changes in ${this.m.repo}: ${r.out.trim().slice(-200)}`;
       }
-      if (waited >= this.m.mainBusyWaitMin) throw new StopRun(`${why} — czekałem ${waited} min; fala ${wave.id} gotowa na ${ib}`);
-      this.warnOnce(`main-${wave.id}`, `${why} — czekam, aż wróci na czysty ${main}`);
-      this.log(`[${wave.id}] ${why} — czekam ${WAIT_STEP_MIN} min`);
+      if (waited >= this.m.mainBusyWaitMin) throw new StopRun(`${why} — waited ${waited} min; wave ${wave.id} ready on ${ib}`);
+      this.warnOnce(`main-${wave.id}`, `${why} — waiting for a clean checkout of ${main}`);
+      this.log(`[${wave.id}] ${why} — waiting ${WAIT_STEP_MIN} min`);
       await sleep(WAIT_STEP_MIN * 60_000);
     }
     ws.mergeCommit = await git(this.m.repo, `rev-parse ${main}`);
     if (this.m.policy.push) {
       const p = await sh(`git push origin ${q(main)}`, this.m.repo, 600);
       ws.pushed = p.code === 0;
-      this.log(`[${wave.id}] push ${main}: ${ws.pushed ? 'ok' : 'NIEUDANY — ' + p.out.slice(-300)}`);
-      if (!ws.pushed) this.warnOnce(`push-${wave.id}`, `push ${main} po fali ${wave.id} nieudany — praca jest lokalnie`);
+      this.log(`[${wave.id}] push ${main}: ${ws.pushed ? 'ok' : 'FAILED — ' + p.out.slice(-300)}`);
+      if (!ws.pushed) this.warnOnce(`push-${wave.id}`, `push ${main} after wave ${wave.id} failed — work remains local`);
     }
     this.store.save();
   }
 
-  // ───────────────────────────── sprzątanie ─────────────────────────────
+  // Cleanup.
 
-  /** Worktree znika, gdy jest czysty; gałąź znika tylko, gdy jest w main i założył ją ten przebieg. */
+  /** Remove only clean worktrees and branches created by this run that are already integrated. */
   private async cleanup(wave: Wave) {
     const main = this.m.mainBranch;
     const items = Object.values(this.store.state.tracks)
@@ -812,15 +805,15 @@ Na końcu: worktree czysty, krótki raport scalenia.
       for (const it of items) {
         if (existsSync(it.wt)) {
           const killed = [...(await killProcessesIn(it.wt)), ...(it.port ? await killPort(it.port) : [])];
-          if (killed.length) this.log(`sprzątanie: ubito ${killed.length} proces(ów) w ${it.wt}`);
+          if (killed.length) this.log(`cleanup: terminated ${killed.length} processes in ${it.wt}`);
           const r = await sh(`git worktree remove ${q(it.wt)}`, this.m.repo);
-          if (r.code === 0) this.log(`sprzątanie: usunięto worktree ${it.wt}`);
+          if (r.code === 0) this.log(`cleanup: removed worktree ${it.wt}`);
           else {
-            // Windows: git wyrejestrował worktree, ale nie skasował katalogu (zablokowane pliki, ścieżki > 260 znaków).
+            // Windows may unregister a worktree without deleting its directory because of locks or long paths.
             await sh('git worktree prune', this.m.repo);
             const still = (await sh('git worktree list --porcelain', this.m.repo)).out.replace(/\\/g, '/').includes(it.wt.replace(/\\/g, '/'));
             const gone = !still && (await removeDirHard(it.wt));
-            this.log(gone ? `sprzątanie: usunięto worktree ${it.wt} (dociśnięte po „${r.out.trim().slice(0, 80)}”)` : `sprzątanie: worktree ${it.wt} zostaje (${r.out.trim().slice(0, 160)})`);
+            this.log(gone ? `cleanup: removed worktree ${it.wt} (forced after „${r.out.trim().slice(0, 80)}”)` : `cleanup: worktree ${it.wt} retained (${r.out.trim().slice(0, 160)})`);
           }
         }
         if (it.own && (await gitOk(this.m.repo, `merge-base --is-ancestor ${q(it.branch)} ${q(main)}`))) {
@@ -832,7 +825,7 @@ Na końcu: worktree czysty, krótki raport scalenia.
   }
 }
 
-/** PNG-i z katalogu pokazu (rekurencyjnie, posortowane). */
+/** List PNG files recursively in sorted order. */
 function listPngsIn(dir: string): string[] {
   return (readdirSync(dir, { recursive: true } as any) as any[])
     .map(String)
@@ -841,7 +834,7 @@ function listPngsIn(dir: string): string[] {
     .map((f) => join(dir, f));
 }
 
-/** Gałąź `prestart/<key>` od `main` ze scalonymi `branches` (tymczasowy worktree, potem sprzątany). SHA albo undefined przy konflikcie. */
+/** Build prestart/<key> from main plus dependency branches using a temporary worktree. Return undefined on conflict. */
 export async function prestartBranch(repo: string, worktreeRoot: string, main: string, key: string, branches: string[], log: (l: string) => void = () => {}): Promise<string | undefined> {
   if (branches.length === 0) return git(repo, `rev-parse ${q(main)}`);
   const br = `prestart/${key}`;
@@ -856,7 +849,7 @@ export async function prestartBranch(repo: string, worktreeRoot: string, main: s
       const r = await sh(`git merge --no-ff --no-edit ${q(b)}`, dir);
       if (r.code !== 0) {
         await sh('git merge --abort', dir);
-        log(`[${key}] prestart: konflikt przy ${b}`);
+        log(`[${key}] prestart: conflict in ${b}`);
         ok = false;
         break;
       }

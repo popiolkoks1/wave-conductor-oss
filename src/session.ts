@@ -10,37 +10,37 @@ export interface Question {
   options: { label: string; description?: string }[];
 }
 
-/** Ktoś, kto odpowiada zamiast człowieka — nadzorca. */
+/** The supervisor answers on behalf of the owner. */
 export type Answerer = (qs: Question[], from: string) => Promise<Record<string, string>>;
 
 export interface SessionSpec {
-  /** klucz do logów i kosztów */
+  /** Key used for session logs and cost accounting. */
   name: string;
   costKey?: string | null;
   cwd: string;
   prompt: string;
   resume?: string;
   model?: string;
-  /** katalogi, w których wolno pisać (worktree + writeRoots) */
+  /** Allowed write directories: worktree and writeRoots. */
   writeRoots: string[];
   extraDeny: string[];
-  /** zamrożone ścieżki względem `worktree` */
+  /** Frozen paths relative to worktree. */
   denyPaths?: string[];
   worktree?: string;
   answer?: Answerer;
   systemAppend?: string;
-  /** zestaw narzędzi; domyślnie pełny Claude Code */
+  /** Available tools; defaults to the full Claude Code toolset. */
   tools?: string[];
   additionalDirectories?: string[];
   outputSchema?: Record<string, unknown>;
   settingSources?: Options['settingSources'];
   maxTurns?: number;
   maxBudgetUsd?: number;
-  /** limit zegara ściennego jednego podejścia sesji */
+  /** Wall-clock limit for one session attempt. */
   timeoutMin?: number;
-  /** wołane, gdy tylko sesja dostanie id — żeby stan miał je, zanim sesja się skończy (wznowienie po padnięciu) */
+  /** Persist the session ID as soon as it is available, allowing recovery before completion. */
   onSessionId?: (id: string) => void;
-  /** rzadkie zdarzenia środowiska (czekanie na reset limitu) — idą do powiadomień */
+  /** Notify about infrequent environment waits, such as subscription limit resets. */
   onWait?: (msg: string) => void;
 }
 
@@ -54,14 +54,11 @@ export interface SessionOutcome {
   denials: string[];
 }
 
-/** Przerwy między próbami po błędzie bez znanego resetu (sieć, 5xx): łącznie ~6 h, czyli dłużej niż okno 5-godzinne. */
+/** Backoff for failures without a known reset time (network or 5xx): about six hours total, longer than a five-hour window. */
 const BACKOFF_MIN = [1, 5, 15, 30, 60, 60, 60, 60, 60];
 const MAX_TIMEOUTS = 3;
 
-/**
- * Ile czekać przed kolejną próbą. Gdy SDK zgłosiło odrzucenie z `resetsAt`, czekamy do resetu (+1 min),
- * zamiast strzelać co kilka minut w zamknięte okno. Zwraca ms.
- */
+/** Return retry delay in milliseconds. When the SDK reports resetsAt, wait until reset plus one minute instead of repeatedly retrying a closed window. */
 export function waitMs(attempt: number, resetsAt: number | undefined, now = Date.now()): number {
   if (resetsAt) {
     const at = resetsAt < 1e12 ? resetsAt * 1000 : resetsAt;
@@ -86,27 +83,27 @@ export async function runSession(spec: SessionSpec, store: Store): Promise<Sessi
       last = await once({ ...spec, resume, prompt }, store, denials, limit);
       cost += last.costUsd;
       if (last.ok || /error_max_(turns|budget)/.test(last.subtype) || last.structured !== undefined) break;
-      store.log(`[${spec.name}] sesja zakończona błędem ${last.subtype}: ${last.text.slice(0, 200)}`);
+      store.log(`[${spec.name}] session failed with ${last.subtype}: ${last.text.slice(0, 200)}`);
     } catch (e: any) {
-      store.log(`[${spec.name}] wyjątek sesji: ${String(e?.message ?? e).slice(0, 300)}`);
+      store.log(`[${spec.name}] session exception: ${String(e?.message ?? e).slice(0, 300)}`);
       last = { ok: false, subtype: 'exception', text: String(e?.message ?? e), costUsd: 0, denials, sessionId: last?.sessionId ?? resume };
     }
     if (last.sessionId) resume = last.sessionId;
 
     if (last.subtype === 'timeout') {
       if (++timeouts > MAX_TIMEOUTS) break;
-      store.log(`[${spec.name}] przekroczony limit ${spec.timeoutMin} min — wznawiam od razu`);
+      store.log(`[${spec.name}] exceeded limit ${spec.timeoutMin} min — resuming immediately`);
       prompt =
-        `Dyrygent przerwał sesję po ${spec.timeoutMin} min zegara. Najczęstsza przyczyna: polecenie na pierwszym planie, które się nie kończy ` +
-        `(serwer dev, watch, commit czekający na hasło). Takie rzeczy uruchamiaj w tle z limitem czasu. Kontynuuj zadanie.`;
+        `The conductor interrupted the session after ${spec.timeoutMin} min of elapsed time. A common cause is a foreground command that never exits ` +
+        `(dev server, watcher or commit waiting for a password). Run these in the background with a timeout. Continue the task.`;
       continue;
     }
     const wait = waitMs(attempt, limit.resetsAt);
     const mins = Math.round(wait / 60000);
-    store.log(`[${spec.name}] ponawiam za ${mins} min${limit.resetsAt ? ' (reset limitu subskrypcji)' : ''}`);
-    if (limit.resetsAt && mins >= 20) spec.onWait?.(`limit subskrypcji — czekam ${mins} min do resetu, potem wznawiam sam`);
+    store.log(`[${spec.name}] retrying in ${mins} min${limit.resetsAt ? ' (subscription limit reset)' : ''}`);
+    if (limit.resetsAt && mins >= 20) spec.onWait?.(`subscription limit — waiting ${mins} min until reset, then resuming automatically`);
     await sleep(wait);
-    if (resume) prompt = 'Sesja została przerwana (limit albo błąd sieci). Kontynuuj dokładnie od miejsca, w którym przerwałeś.';
+    if (resume) prompt = 'The session was interrupted by a limit or network error. Continue exactly where you left off.';
   }
   return { ...last!, costUsd: cost, denials };
 }
@@ -120,7 +117,7 @@ async function once(spec: SessionSpec, store: Store, denials: string[], limit: {
         abort.abort();
       }, spec.timeoutMin * 60_000)
     : undefined;
-  const timeout = (): SessionOutcome => ({ ok: false, subtype: 'timeout', text: 'przekroczony limit czasu', costUsd: 0, denials, sessionId: limit.sessionId ?? spec.resume });
+  const timeout = (): SessionOutcome => ({ ok: false, subtype: 'timeout', text: 'time limit exceeded', costUsd: 0, denials, sessionId: limit.sessionId ?? spec.resume });
   try {
     const r = await drive(spec, store, denials, limit, abort);
     return timedOut ? timeout() : r;
@@ -147,7 +144,7 @@ async function drive(spec: SessionSpec, store: Store, denials: string[], limit: 
     maxBudgetUsd: spec.maxBudgetUsd,
     stderr: (d) => store.sessionLog(spec.name, { stderr: d.slice(0, 2000) }),
     hooks: {
-      // Hook odpala się przy KAŻDYM narzędziu, także tym, które ustawienia projektu dopuszczają bez pytania.
+      // Apply the hook to EVERY tool, including tools allowed without prompting by project settings.
       PreToolUse: [
         {
           hooks: [
@@ -155,12 +152,12 @@ async function drive(spec: SessionSpec, store: Store, denials: string[], limit: 
               const why = checkTool(input.tool_name, input.tool_input, spec.writeRoots, spec.extraDeny, spec.denyPaths, spec.worktree);
               if (!why) return {};
               denials.push(`${input.tool_name}: ${why}`);
-              store.log(`[${spec.name}] ZAKAZ ${input.tool_name}: ${why}`);
+              store.log(`[${spec.name}] DENIED ${input.tool_name}: ${why}`);
               return {
                 hookSpecificOutput: {
                   hookEventName: 'PreToolUse',
                   permissionDecision: 'deny',
-                  permissionDecisionReason: `Dyrygent: ${why}. Nikt nie odpowie na prośbę o wyjątek — znajdź inną drogę albo zapisz to jako otwartą sprawę w podsumowaniu.`,
+                  permissionDecisionReason: `Conductor: ${why}. No one will answer an exception request; find another approach or record an open issue in the summary.`,
                 },
               };
             },
@@ -174,7 +171,7 @@ async function drive(spec: SessionSpec, store: Store, denials: string[], limit: 
         const answers = await spec.answer(qs, spec.name);
         return { behavior: 'allow', updatedInput: { ...input, answers } };
       }
-      // Wszystko, co przeszło hook zakazów, jest dozwolone — człowieka nie ma.
+      // Allow calls that pass restrictions; no human is present to answer permission prompts.
       return { behavior: 'allow', updatedInput: input };
     },
   };

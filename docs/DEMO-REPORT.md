@@ -3,30 +3,30 @@
 Captured from `npm run demo`; commit hashes and timestamps vary. No model sessions are used. The temporary repository and logs are removed after the demo.
 
 ```text
-# Raport przebiegu — account-free-demo
+# Run report — account-free-demo
 
-- przebieg: `demo`, 2026-10-26 11:45 → 2026-10-26 11:45 (0 min)
-- wynik: **wszystkie fale przeszły**
-- conductor/demo: `5fd48c82e4` → `7907608af0`
-- decyzje nadzorcy: **0** (pełna lista: `DECYZJE.md`)
-- szacowany koszt: $0.00
+- run: `demo`, 2026-10-26 11:59 → 2026-10-26 11:59 (0 min)
+- result: **all waves completed**
+- conductor/demo: `cfd9216b1d` → `9d8517ee01`
+- supervisor decisions: **0** (full list: `DECISIONS.md`)
+- estimated cost: $0.00
 
 - running: 0; integrated: 1; deferred: 0
 - result branch: conductor/demo
 - next action: Review the result diff and any deferred tasks.
 
-## Fala documentation — merged · 0 min
+## Wave documentation — merged · 0 min
 
-bramki integracji: ✓ usage 1/1
+integration gates: ✓ usage 1/1
 
-| tor | status | min | commity | bramki / powód | koszt |
+| track | status | min | commits | gates / reason | cost |
 |---|---|---|---|---|---|
-| docs | ✓ scalony | — | 1 | zrobiony przed przebiegiem (done) | $0.00 |
+| docs | ✓ integrated | — | 1 | completed before the run (done) | $0.00 |
 
-## Do obejrzenia ręcznie
+## Manual review
 
-Brak odłożonych torów. Gałąź wyniku: conductor/demo.
+No deferred tracks. Result branch: conductor/demo.
 
-Logi sesji: `sessions/*.jsonl`, przebieg w czasie: `events.log`.
+Session logs: `sessions/*.jsonl`, execution timeline: `events.log`.
 
 ```

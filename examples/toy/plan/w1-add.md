@@ -1,2 +1,3 @@
-# Tor add
-Dodaj do `calc.js` eksportowaną funkcję `add(a, b)` zwracającą sumę. Dopisz test `test/add.test.js`. Zacommituj.
+# Track: add
+
+Export `add(a, b)` from calc.js to return the sum. Add test/add.test.js. Commit your changes.
