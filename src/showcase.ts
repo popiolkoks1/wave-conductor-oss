@@ -19,10 +19,7 @@ const listPngs = (dir: string) =>
         .map((f) => join(dir, f))
     : [];
 
-/**
- * Pokaz projektu robiony przez DYRYGENTA, nie przez sesję toru: serwer w worktree w tle, czekanie na 200,
- * polecenie zrzutów z manifestu, sprzątanie serwera. Tor nie ma wpływu na to, co zobaczy recenzent.
- */
+/** The conductor launches the showcase server, waits for HTTP 200, captures screenshots and cleans up. Tracks do not choose what the reviewer sees. */
 export async function takeShowcase(r: Review, worktree: string, port: number, out: string): Promise<Shots> {
   mkdirSync(out, { recursive: true });
   await killPort(port);
@@ -37,8 +34,8 @@ export async function takeShowcase(r: Review, worktree: string, port: number, ou
       up = c.out.trim() === '200';
       if (!up) await new Promise((res) => setTimeout(res, 2000));
     }
-    if (!up) return { dir: out, pngs: [], log: `serwer pokazu nie wstał w 3 min (${ready})` };
-    // Ścieżka w poleceniu bash: ukośniki do przodu i w cudzysłowie — `\` z Windowsa bash zjada („C:Users…”, zmierzone 2026-10-03).
+    if (!up) return { dir: out, pngs: [], log: `showcase server did not become ready within 3 min (${ready})` };
+    // Quote paths and use forward slashes in Bash commands; unescaped Windows backslashes are consumed by the shell.
     const cmd = r.showcase.replaceAll('{url}', url).replaceAll('{out}', JSON.stringify(out.replace(/\\/g, '/')));
     const res = await sh(cmd, worktree, 1800, 8000);
     log = res.out;
@@ -48,7 +45,7 @@ export async function takeShowcase(r: Review, worktree: string, port: number, ou
       try {
         process.kill(-server.pid, 'SIGTERM');
       } catch {
-        /* już nie żyje */
+        /* Process has already exited. */
       }
     }
     await killProcessesIn(worktree);
@@ -58,7 +55,7 @@ export async function takeShowcase(r: Review, worktree: string, port: number, ou
 
 const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
 
-/** Strona „przed / po”: te same nazwy plików obok siebie, recenzja na górze. Ścieżki względne, działa z dysku. */
+/** Write a local before/after page pairing matching filenames with the review at the top. Use relative paths. */
 export function writeShowcasePage(page: string, title: string, after: Shots, before: Shots | undefined, verdict: { stars: number; verdict: string; summary: string; issues: string[] } | undefined): string {
   const dir = join(page, '..');
   const rel = (p: string) => relative(dir, p).replace(/\\/g, '/');
@@ -66,17 +63,17 @@ export function writeShowcasePage(page: string, title: string, after: Shots, bef
   const rows = after.pngs
     .map((p) => {
       const prev = prevByName.get(basename(p));
-      return `<section><h3>${esc(basename(p, '.png'))}</h3><div class="pair">${prev ? `<figure><img src="${rel(prev)}" loading="lazy"><figcaption>przed</figcaption></figure>` : ''}<figure><img src="${rel(p)}" loading="lazy"><figcaption>${prev ? 'po' : 'teraz'}</figcaption></figure></div></section>`;
+      return `<section><h3>${esc(basename(p, '.png'))}</h3><div class="pair">${prev ? `<figure><img src="${rel(prev)}" loading="lazy"><figcaption>before</figcaption></figure>` : ''}<figure><img src="${rel(p)}" loading="lazy"><figcaption>${prev ? 'po' : 'now'}</figcaption></figure></div></section>`;
     })
     .join('\n');
   const head = verdict
-    ? `<p class="v">Recenzent: <b>${'★'.repeat(verdict.stars)}${'☆'.repeat(Math.max(0, 3 - verdict.stars))}</b> (${esc(verdict.verdict)}) — ${esc(verdict.summary)}</p>${verdict.issues.length ? `<ul>${verdict.issues.map((i) => `<li>${esc(i)}</li>`).join('')}</ul>` : ''}`
+    ? `<p class="v">Reviewer: <b>${'★'.repeat(verdict.stars)}${'☆'.repeat(Math.max(0, 3 - verdict.stars))}</b> (${esc(verdict.verdict)}) — ${esc(verdict.summary)}</p>${verdict.issues.length ? `<ul>${verdict.issues.map((i) => `<li>${esc(i)}</li>`).join('')}</ul>` : ''}`
     : '';
   const html = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title>
 <style>:root{color-scheme:light dark}body{font:15px/1.5 system-ui,sans-serif;margin:16px;background:Canvas;color:CanvasText}
 .pair{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px}img{width:100%;border:1px solid #8884;border-radius:6px}
 figure{margin:0}figcaption{opacity:.7;font-size:13px}h3{margin:24px 0 8px}.v{font-size:17px}</style>
-<h1>${esc(title)}</h1>${head}${after.pngs.length ? '' : `<p>Brak zrzutów. Log: <pre>${esc(after.log.slice(-3000))}</pre></p>`}
+<h1>${esc(title)}</h1>${head}${after.pngs.length ? '' : `<p>No screenshots. Log: <pre>${esc(after.log.slice(-3000))}</pre></p>`}
 ${rows}`;
   writeFileSync(page, html);
   return page;

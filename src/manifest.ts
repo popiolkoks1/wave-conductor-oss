@@ -3,99 +3,98 @@ import { dirname, resolve, isAbsolute } from 'node:path';
 import YAML from 'yaml';
 import { DEFAULT_NOTIFY, type NotifyConfig } from './notify.js';
 
-/** Bramka: polecenie powłoki, zielone = kod wyjścia 0. `runs`/`mustPass` tłumią szum (np. testy wizualne). */
+/** A shell check passes with exit code 0; runs/mustPass can tolerate noise. */
 export interface Gate {
   name: string;
   run: string;
-  /** katalog względem worktree toru / integracji */
+  /** Directory relative to the track or integration worktree. */
   cwd?: string;
   runs?: number;
   mustPass?: number;
   timeoutSec?: number;
-  /**
-   * Bramka fali/integracji mierzona na czystym main przed falą; czerwona tam = w tej fali tylko informacyjna.
-   * `false` dla bramek, które sprawdzają NOWĄ rzecz (cel), bo na main muszą być czerwone. Bramki toru to zawsze cele.
-   */
+  /** Measure wave/integration regression gates on clean main. Use false for new acceptance criteria that cannot pass on main. Track gates always check task goals. */
   baseline?: boolean;
+  /** JSON string array of failing test IDs, relative to gate cwd. */
+  failuresFile?: string;
 }
 
 export interface Variant {
   id: string;
-  /** dopisek do promptu toru: czym ten wariant różni się od innych */
+  /** Additional prompt text describing how this variant differs. */
   note: string;
 }
 
 export interface Track {
   id: string;
-  /** plik z promptem toru (względem planDir) albo prompt wprost */
+  /** A prompt file relative to planDir, or an inline prompt. */
   promptFile?: string;
   prompt?: string;
   branch?: string;
-  /** gałąź, od której tor startuje; domyślnie gałąź główna po poprzedniej fali */
+  /** Starting branch; defaults to the main branch after the previous wave. */
   base?: string;
-  /** czerwony po wszystkich poprawkach = koniec całego przebiegu (zamiast odłożenia toru) */
+  /** Stop the run if this track still fails after all repairs. */
   required?: boolean;
-  /** kilka wariantów tego samego toru; sędzia wybiera jeden, reszta zostaje na gałęziach */
+  /** Run several variants; choose a winner and retain the alternative branches. */
   variants?: Variant[];
   judgeCriteria?: string;
   gates?: Gate[];
   model?: string;
-  /** tor już zrobiony poza dyrygentem: gałąź istnieje (lokalnie albo na origin), sesji nie ma — idzie prosto do scalania */
+  /** An existing completed branch, local or on origin, that skips agent execution and goes to integration. */
   done?: boolean;
-  /** nazwa katalogu worktree w worktreeRoot (domyślnie id toru) — gdy prompt planu podaje konkretny katalog */
+  /** Worktree directory name under worktreeRoot; defaults to the track ID. */
   dir?: string;
-  /** port serwera dev (domyślnie basePort + numer toru w fali) — gdy prompt planu podaje konkretny port */
+  /** Dev server port; defaults to basePort plus the track index within the wave. */
   port?: number;
-  /** dodatkowe zamrożone ścieżki tylko dla tego toru (np. tory frontendu nie ruszają math/) */
+  /** Additional paths frozen for this track, such as math/ for frontend work. */
   denyPaths?: string[];
-  /**
-   * Tory z WCZEŚNIEJSZYCH fal, od których ten tor zależy. Gdy wszystkie są zielone (a dla wariantów — rozstrzygnięte),
-   * tor startuje od razu, jeszcze w trakcie poprzedniej fali, od gałęzi `prestart/<id>` = main + scalone zależności.
-   * Bez `needs` tor czeka na koniec poprzedniej fali (jak dotąd).
-   */
+  /** Dependencies from earlier waves. Start when they pass and variants are resolved, using prestart/<id> = main plus dependency branches. Without needs, wait for the previous wave. */
   needs?: string[];
 }
 
-/** Niezależny recenzent i pokaz projektu: dyrygent sam stawia serwer, robi zrzuty i daje je recenzentowi, który nie czyta samooceny torów. */
+/** The conductor captures screenshots independently; the reviewer does not read track self-assessments. */
 export interface Review {
-  /** Dodatkowe instrukcje recenzenta dopasowane do projektu. */
+  /** Additional project-specific reviewer instructions. */
   instructions?: string;
-  /** polecenie serwera w worktree, w tle; `{port}` podstawia dyrygent */
+  /** Background server command in the worktree; the conductor substitutes {port}. */
   serve: string;
-  /** ścieżka sprawdzana, aż serwer odpowie 200 (domyślnie `/`) */
+  /** Readiness path polled for HTTP 200; defaults to /. */
   ready?: string;
-  /** polecenie robiące zrzuty; `{url}` i `{out}` podstawia dyrygent; PNG-i lądują w `{out}` */
+  /** Screenshot command; the conductor substitutes {url} and {out}. Write PNG files into {out}. */
   showcase: string;
-  /** plik (względem planDir) z kryteriami oceny, np. checklista i kryteria projektu */
+  /** Criteria files relative to planDir, such as accessibility and product checklists. */
   criteria?: string[];
-  /** sędzia wariantów ocenia po zrzutach, nie po samoocenie (domyślnie true) */
+  /** Judge variants from screenshots rather than self-assessments; defaults to true. */
   judge?: boolean;
-  /** po scaleniu fali: pokaz + ocena recenzenta; „fix” = jedna runda poprawek sesji scalającej (domyślnie true) */
+  /** Review each integrated wave; fix permits one integration-session repair round. Defaults to true. */
   wave?: boolean;
-  /** port serwera pokazu (domyślnie mergePort + 5) */
+  /** Showcase server port; defaults to mergePort + 5. */
   port?: number;
 }
 
 export interface Wave {
   id: string;
   tracks: Track[];
-  /** bramki odpalane w każdym torze tej fali (dokładane do bramek toru) */
+  /** Gates run in every track in this wave, in addition to track gates. */
   gates?: Gate[];
-  /** prompt scalania (np. M-SCALANIE-FALI.md); bez niego dyrygent scala sam, a konflikty oddaje sesji */
+  /** Optional integration prompt. Without one, the conductor merges and delegates conflicts to a session. */
   mergePromptFile?: string;
   mergePrompt?: string;
   integrationGates?: Gate[];
 }
 
 export interface Policy {
-  /** dodatkowe zakazane wzorce poleceń Bash (regex) — np. skrypt wdrożenia */
+  /** Additional forbidden Bash command patterns, such as deployment scripts. */
   denyBash?: string[];
-  /** katalogi, w których sesje mogą pisać poza własnym worktree */
+  /** Directories where sessions may write outside their worktree. */
   writeRoots?: string[];
-  /** ścieżki (względem worktree), do których NIE wolno pisać — np. math/, src/types/ (pliki zamrożone) */
+  /** Frozen paths relative to the worktree, such as math/ or src/types/. */
   denyPaths?: string[];
-  /** dyrygent robi `git push origin <main>` po każdej scalonej fali (nigdy --force) */
+  /** Push the integration target after each merged wave; never force-push. */
   push?: boolean;
+  /** Keep main untouched; run in a dedicated checkout on this branch. */
+  outputBranch?: string;
+  /** Git pathspecs checked after sessions, including shell-based edits. */
+  protectedPaths?: string[];
 }
 
 export interface Models {
@@ -103,57 +102,57 @@ export interface Models {
   supervisor?: string;
   merge?: string;
   judge?: string;
-  /** szybszy model do prostych ocen (czy sesja skończyła) — domyślnie `supervisor` */
+  /** Faster model for simple completion reviews; defaults to supervisor. */
   light?: string;
-  /** recenzent pokazu (domyślnie `judge`) */
+  /** Showcase reviewer model; defaults to judge. */
   reviewer?: string;
 }
 
 export interface Manifest {
   name: string;
-  /** repozytorium projektu */
+  /** Project repository. */
   repo: string;
   mainBranch: string;
-  /** katalog planu (prompty torów, zasady wspólne) */
+  /** Plan directory containing task prompts and shared rules. */
   planDir: string;
-  /** katalog startowy sesji (np. katalog z hookami projektu); praca i tak idzie w worktree. Domyślnie worktree. */
+  /** Session startup directory for project hooks; work still happens in the worktree. Defaults to the worktree. */
   sessionCwd?: string;
-  /** port serwera dev dla sesji scalającej */
+  /** Integration session dev server port. */
   mergePort: number;
-  /** pliki kontekstu dla nadzorcy i doklejane do każdego toru (względem planDir) */
+  /** Plan context files read by the supervisor and each track, relative to planDir. */
   context: string[];
-  /** gdzie zakładać worktree torów */
+  /** Root directory for track worktrees. */
   worktreeRoot: string;
-  /** gdzie zapisywać stan przebiegu */
+  /** Run state directory. */
   stateDir: string;
   maxParallel: number;
   maxFixAttempts: number;
   maxFollowUps: number;
   maxTurns?: number;
   maxBudgetUsd?: number;
-  /** polecenia odpalane w każdym nowym worktree (np. pnpm install) */
+  /** Setup commands for each new worktree, such as pnpm install. */
   setup: string[];
-  /** pierwszy port serwera dev; tor N dostaje basePort + N, żeby równoległe serwery się nie gryzły */
+  /** First dev server port; track N uses basePort + N to avoid collisions. */
   basePort: number;
-  /** sesja dłuższa niż tyle minut zegara ściennego jest przerywana i wznawiana (wisi na serwerze dev, na commicie…) */
+  /** Interrupt and resume sessions that exceed this wall-clock limit, such as a blocked dev server or commit. */
   sessionTimeoutMin: number;
-  /** szacowany koszt całego przebiegu, po którym dyrygent kończy (z raportem); brak = bez limitu */
+  /** Estimated run cost limit; stop with a report when reached. Unset means unlimited. */
   maxRunBudgetUsd?: number;
-  /** poniżej tylu GB wolnego miejsca nie zakłada nowych worktree */
+  /** Do not create new worktrees below this many free GB. */
   minFreeGb: number;
-  /** ile minut czekać, aż katalog repo wróci na czysty main, zanim fala się zatrzyma */
+  /** Maximum wait for the main checkout to become available before stopping the wave. */
   mainBusyWaitMin: number;
   notify: NotifyConfig;
   settingSources: ('user' | 'project' | 'local')[];
   models: Models;
   policy: Policy;
-  /** narzędzia, które muszą być na PATH (doctor sprawdza przed startem), np. node, pnpm, make, cargo */
+  /** Required PATH tools checked by doctor, such as node, pnpm, make or cargo. */
   requires: string[];
   review?: Review;
-  /** przesunięcie portów torów startujących wcześniej (`needs`), żeby nie gryzły się z torami bieżącej fali */
+  /** Port offset for early-start tracks to avoid conflicts with the current wave. */
   earlyPortOffset: number;
   waves: Wave[];
-  /** katalog, z którego wczytano manifest */
+  /** Directory containing the manifest. */
   baseDir: string;
 }
 
@@ -167,7 +166,7 @@ export function loadManifest(path: string): Manifest {
 
 export function normalizeManifest(raw: any, baseDir: string): Manifest {
   const errors: string[] = [];
-  const need = (k: string) => raw[k] === undefined && errors.push(`brak pola "${k}"`);
+  const need = (k: string) => raw[k] === undefined && errors.push(`missing field "${k}"`);
   ['name', 'repo', 'planDir', 'waves'].forEach(need);
   if (errors.length) throw new Error(`Manifest: ${errors.join(', ')}`);
 
@@ -202,6 +201,8 @@ export function normalizeManifest(raw: any, baseDir: string): Manifest {
       writeRoots: (raw.policy?.writeRoots ?? []).map((p: string) => abs(baseDir, p)),
       denyPaths: raw.policy?.denyPaths ?? [],
       push: raw.policy?.push ?? false,
+      outputBranch: raw.policy?.outputBranch,
+      protectedPaths: raw.policy?.protectedPaths ?? [],
     },
     requires: raw.requires ?? [],
     review: raw.review,
@@ -209,28 +210,31 @@ export function normalizeManifest(raw: any, baseDir: string): Manifest {
     waves: raw.waves,
     baseDir,
   };
-  if (m.review?.instructions !== undefined && typeof m.review.instructions !== 'string') errors.push('review.instructions musi być tekstem');
-  if (m.review && (!m.review.serve || !m.review.showcase)) errors.push('review wymaga serve i showcase');
+  if (m.review?.instructions !== undefined && typeof m.review.instructions !== 'string') errors.push('review.instructions must be a string');
+  if (m.review && (!m.review.serve || !m.review.showcase)) errors.push('review requires serve and showcase');
 
+  if (!Number.isInteger(m.maxParallel) || m.maxParallel < 1) errors.push('maxParallel must be a positive integer');
+  if (m.policy.outputBranch && !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(m.policy.outputBranch)) errors.push('invalid outputBranch');
+  if (m.policy.outputBranch === m.mainBranch) errors.push('outputBranch must differ from mainBranch');
   const ids = new Set<string>();
-  if (!Array.isArray(m.waves) || m.waves.length === 0) errors.push('waves musi być niepustą listą');
+  if (!Array.isArray(m.waves) || m.waves.length === 0) errors.push('waves must be a nonempty array');
   for (const w of m.waves ?? []) {
-    if (!w.id) errors.push('fala bez id');
-    if (!Array.isArray(w.tracks) || w.tracks.length === 0) errors.push(`fala ${w.id}: brak torów`);
+    if (!w.id) errors.push('wave has no id');
+    if (!Array.isArray(w.tracks) || w.tracks.length === 0) errors.push(`wave ${w.id}: no tracks`);
     for (const t of w.tracks ?? []) {
-      if (!t.id) errors.push(`fala ${w.id}: tor bez id`);
-      if (ids.has(t.id)) errors.push(`zdublowane id toru: ${t.id}`);
+      if (!t.id) errors.push(`wave ${w.id}: track has no id`);
+      if (ids.has(t.id)) errors.push(`duplicate track id: ${t.id}`);
       ids.add(t.id);
-      if (!t.done && !t.promptFile && !t.prompt) errors.push(`tor ${t.id}: potrzebny promptFile albo prompt`);
-      if (t.variants && t.variants.length < 2) errors.push(`tor ${t.id}: variants wymaga ≥ 2 wariantów`);
-      for (const g of [...(t.gates ?? [])]) checkGate(g, `tor ${t.id}`, errors);
+      if (!t.done && !t.promptFile && !t.prompt) errors.push(`track ${t.id}: promptFile or prompt is required`);
+      if (t.variants && t.variants.length < 2) errors.push(`track ${t.id}: variants requires at least 2 candidates`);
+      for (const g of [...(t.gates ?? [])]) checkGate(g, `track ${t.id}`, errors);
     }
-    for (const g of [...(w.gates ?? []), ...(w.integrationGates ?? [])]) checkGate(g, `fala ${w.id}`, errors);
+    for (const g of [...(w.gates ?? []), ...(w.integrationGates ?? [])]) checkGate(g, `wave ${w.id}`, errors);
   }
-  // needs: tylko tory z wcześniejszych fal (zależność w tej samej fali nic nie przyspiesza, a w przód — nie da się)
+  // Only earlier-wave dependencies are allowed; same-wave and forward dependencies are unsupported.
   const earlier = new Set<string>();
   for (const w of m.waves ?? []) {
-    for (const t of w.tracks ?? []) for (const n of t.needs ?? []) if (!earlier.has(n)) errors.push(`tor ${t.id}: needs „${n}” musi być torem z wcześniejszej fali`);
+    for (const t of w.tracks ?? []) for (const n of t.needs ?? []) if (!earlier.has(n)) errors.push(`track ${t.id}: needs „${n}” must reference a track from an earlier wave`);
     for (const t of w.tracks ?? []) earlier.add(t.id);
   }
   if (errors.length) throw new Error(`Manifest: ${errors.join('; ')}`);
@@ -238,13 +242,15 @@ export function normalizeManifest(raw: any, baseDir: string): Manifest {
 }
 
 function checkGate(g: Gate, where: string, errors: string[]) {
-  if (!g.name || !g.run) errors.push(`${where}: bramka wymaga name i run`);
+  if (g.name === 'protected-paths') errors.push(`${where}: protected-paths is reserved`);
+  if (!g.name || !g.run) errors.push(`${where}: gate requires name and run`);
+  if (g.failuresFile && (isAbsolute(g.failuresFile) || g.failuresFile.split(/[\\/]/).includes('..'))) errors.push(`${where}: failuresFile must stay inside gate cwd`);
   const runs = g.runs ?? 1;
   const must = g.mustPass ?? runs;
-  if (must > runs || must < 1) errors.push(`${where}/${g.name}: mustPass musi być w 1..runs`);
+  if (must > runs || must < 1) errors.push(`${where}/${g.name}: mustPass must be in 1..runs`);
 }
 
-/** Bramki regresji do pomiaru bazowego: fali i integracji, bez `baseline: false`. Bramki torów to cele — nie mierzymy ich. */
+/** Baseline regression gates include wave and integration gates unless baseline is false. Track goals are excluded. */
 export function baselineGatesOf(wave: Wave): Gate[] {
   const seen = new Map<string, Gate>();
   for (const g of [...(wave.gates ?? []), ...(wave.integrationGates ?? [])]) if (g.baseline !== false) seen.set(g.name, g);

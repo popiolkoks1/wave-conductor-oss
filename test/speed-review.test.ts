@@ -13,16 +13,16 @@ import { writeShowcasePage } from '../src/showcase.js';
 
 const raw = (waves: any[]) => ({ name: 'x', repo: '/r', planDir: '/p', waves });
 
-test('needs: tylko tory z wcześniejszych fal', () => {
+test('needs only accepts tracks from earlier waves', () => {
   const ok = normalizeManifest(raw([{ id: 'A', tracks: [{ id: 'a', prompt: 'p' }] }, { id: 'B', tracks: [{ id: 'b', prompt: 'p', needs: ['a'] }] }]), '/');
   assert.deepEqual(ok.waves[1].tracks[0].needs, ['a']);
   assert.equal(ok.earlyPortOffset, 50);
-  assert.throws(() => normalizeManifest(raw([{ id: 'A', tracks: [{ id: 'a', prompt: 'p', needs: ['b'] }, { id: 'b', prompt: 'p' }] }]), '/'), /needs „b” musi być torem z wcześniejszej fali/);
-  assert.throws(() => normalizeManifest(raw([{ id: 'A', tracks: [{ id: 'a', prompt: 'p', needs: ['nie-ma'] }] }]), '/'), /needs „nie-ma”/);
-  assert.throws(() => normalizeManifest({ ...raw([{ id: 'A', tracks: [{ id: 'a', prompt: 'p' }] }]), review: { serve: 'x' } }, '/'), /review wymaga serve i showcase/);
+  assert.throws(() => normalizeManifest(raw([{ id: 'A', tracks: [{ id: 'a', prompt: 'p', needs: ['b'] }, { id: 'b', prompt: 'p' }] }]), '/'), /needs „b” must reference a track from an earlier wave/);
+  assert.throws(() => normalizeManifest(raw([{ id: 'A', tracks: [{ id: 'a', prompt: 'p', needs: ['missing'] }] }]), '/'), /needs „missing”/);
+  assert.throws(() => normalizeManifest({ ...raw([{ id: 'A', tracks: [{ id: 'a', prompt: 'p' }] }]), review: { serve: 'x' } }, '/'), /review requires serve and showcase/);
 });
 
-test('semafor: nigdy więcej niż n naraz, wszystko się wykonuje', async () => {
+test('semaphore limits concurrency and executes every task', async () => {
   const s = new Semaphore(2);
   let now = 0;
   let peak = 0;
@@ -55,7 +55,7 @@ function repoWith(root: string) {
   return { repo, g };
 }
 
-test('prestart: main + zależności; konflikt = undefined i sprzątnięty worktree', async () => {
+test('prestart combines main and dependencies; conflicts return undefined and clean up', async () => {
   const root = mkdtempSync(join(tmpdir(), 'prestart-'));
   const { repo, g } = repoWith(root);
   for (const [b, file, body] of [['t/x', 'x.txt', 'x'], ['t/y', 'y.txt', 'y'], ['t/c1', 'a.txt', 'c1'], ['t/c2', 'a.txt', 'c2']]) {
@@ -81,37 +81,37 @@ test('prestart: main + zależności; konflikt = undefined i sprzątnięty worktr
   assert.equal(g('worktree list').split('\n').length, 1);
 });
 
-test('raport na żywo: W TOKU, czas, ⚡, recenzja; strona pokazu przed/po', () => {
+test('live report includes progress, duration, early starts and before/after review', () => {
   const root = mkdtempSync(join(tmpdir(), 'report-'));
   const store = new Store(root, 'r1', () => ({
     runId: 'r1',
     manifest: 'm',
     startedAt: new Date(Date.now() - 5 * 60000).toISOString(),
     startMain: 'abcdef1234',
-    waves: [{ id: 'A', status: 'merged', review: { stars: 2, verdict: 'ok', summary: 'spójnie', issues: ['ucięty licznik'], page: 'x.html' } }, { id: 'B', status: 'tracks' }],
+    waves: [{ id: 'A', status: 'merged', review: { stars: 2, verdict: 'ok', summary: 'consistent', issues: ['clipped counter'], page: 'x.html' } }, { id: 'B', status: 'tracks' }],
     tracks: { b1: { id: 'b1', wave: 'B', branch: 'w/b1', worktree: '/w', status: 'running', attempts: 0, costUsd: 1, early: true, startedAt: new Date(Date.now() - 3 * 60000).toISOString() } },
     decisions: 0,
     costUsd: 1,
   }));
   const m = normalizeManifest(raw([{ id: 'A', tracks: [{ id: 'a', prompt: 'p' }] }, { id: 'B', tracks: [{ id: 'b1', prompt: 'p', needs: ['a'] }] }]), '/');
   const text = writeReport(m, store);
-  assert.match(text, /wynik: \*\*W TOKU\*\*/);
+  assert.match(text, /result: \*\*IN PROGRESS\*\*/);
   assert.match(text, /\(5 min\)/);
-  assert.match(text, /b1 ⚡ \| … w toku \| 3 \|/);
-  assert.match(text, /Recenzent: \*\*★★☆\*\* \(ok\)/);
+  assert.match(text, /b1 ⚡ \| … running \| 3 \|/);
+  assert.match(text, /Reviewer: \*\*★★☆\*\* \(ok\)/);
 
   const shots = join(root, 'shots');
-  mkdirSync(join(shots, 'po'), { recursive: true });
-  mkdirSync(join(shots, 'przed'), { recursive: true });
-  for (const d of ['po', 'przed']) writeFileSync(join(shots, d, 'play-desktop.png'), 'x');
-  const page = writeShowcasePage(join(root, 'p.html'), 'T', { dir: join(shots, 'po'), pngs: [join(shots, 'po', 'play-desktop.png')], log: '' }, { dir: join(shots, 'przed'), pngs: [join(shots, 'przed', 'play-desktop.png')], log: '' }, { stars: 3, verdict: 'ok', summary: 's', issues: [] });
+  mkdirSync(join(shots, 'after'), { recursive: true });
+  mkdirSync(join(shots, 'before'), { recursive: true });
+  for (const d of ['after', 'before']) writeFileSync(join(shots, d, 'play-desktop.png'), 'x');
+  const page = writeShowcasePage(join(root, 'p.html'), 'T', { dir: join(shots, 'after'), pngs: [join(shots, 'after', 'play-desktop.png')], log: '' }, { dir: join(shots, 'before'), pngs: [join(shots, 'before', 'play-desktop.png')], log: '' }, { stars: 3, verdict: 'ok', summary: 's', issues: [] });
   const html = readFileSync(page, 'utf8');
-  assert.match(html, /shots\/przed\/play-desktop\.png/);
-  assert.match(html, /shots\/po\/play-desktop\.png/);
+  assert.match(html, /shots\/before\/play-desktop\.png/);
+  assert.match(html, /shots\/after\/play-desktop\.png/);
   assert.match(html, /★★★/);
 });
 
-test('przebieg: tor z needs na torze poprzedniej fali (done) — obie fale scalone, needs nie psuje kolejności', () => {
+test('pre-completed dependent tracks integrate across waves in order', () => {
   const root = mkdtempSync(join(tmpdir(), 'needs-'));
   const { repo, g } = repoWith(root);
   for (const b of ['wave/a1', 'wave/b1']) {
@@ -132,6 +132,6 @@ test('przebieg: tor z needs na torze poprzedniej fali (done) — obie fale scalo
   const runId = readdirSync(join(root, 'state')).find((f) => /^\d{4}-/.test(f))!;
   const st = JSON.parse(readFileSync(join(root, 'state', runId, 'state.json'), 'utf8'));
   assert.deepEqual(st.waves.map((w: any) => [w.id, w.status]), [['A', 'merged'], ['B', 'merged']]);
-  assert.match(readFileSync(join(root, 'state', runId, 'REPORT.md'), 'utf8'), /wszystkie fale przeszły/);
+  assert.match(readFileSync(join(root, 'state', runId, 'REPORT.md'), 'utf8'), /all waves completed/);
   assert.ok(g('log --format=%s main').includes('wave/b1'));
 });

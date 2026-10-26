@@ -8,17 +8,10 @@ export interface ShResult {
 
 export const IS_WIN = process.platform === 'win32';
 
-/**
- * PowerShell pełną ścieżką: w powłoce dyrygenta (bash -lc z Git for Windows) `powershell` bywa poza PATH —
- * wtedy ubijanie procesów i usuwanie katalogów po cichu nic nie robiło (zmierzone 2026-10-03).
- */
+/** Use the absolute PowerShell path because Git Bash may omit it from PATH; otherwise process termination and directory removal silently fail. */
 const PS = IS_WIN ? `${(process.env.SystemRoot ?? 'C:/Windows').replace(/\\/g, '/')}/System32/WindowsPowerShell/v1.0/powershell.exe` : 'powershell';
 
-/**
- * Powłoka przebiegu. Na macOS `/bin/zsh`. Na Windowsie bash z Git for Windows —
- * cały dyrygent (bramki, `q()`, `df`, potoki) mówi po POSIX-owemu, więc cmd.exe
- * ani PowerShell nie wchodzą w grę. `CONDUCT_SHELL` nadpisuje wybór.
- */
+/** Use zsh on macOS and Git Bash on Windows. Gates and helpers require POSIX shell syntax. CONDUCT_SHELL overrides the choice. */
 function shellPath(): string {
   if (process.env.CONDUCT_SHELL) return process.env.CONDUCT_SHELL;
   if (!IS_WIN) return process.platform === 'darwin' ? '/bin/zsh' : '/bin/bash';
@@ -32,7 +25,7 @@ function shellPath(): string {
 
 export const SHELL = shellPath();
 
-/** Polecenie powłoki z limitem czasu; stdout+stderr razem, ucięte do ostatnich `keep` znaków. */
+/** Run a shell command with a timeout; combine stdout/stderr and retain the last keep characters. */
 export function sh(cmd: string, cwd: string, timeoutSec = 1800, keep = 20000): Promise<ShResult> {
   return new Promise((done) => {
     const child = spawn(SHELL, ['-lc', cmd], { cwd, env: cleanEnv() });
@@ -44,8 +37,8 @@ export function sh(cmd: string, cwd: string, timeoutSec = 1800, keep = 20000): P
     child.stdout.on('data', add);
     child.stderr.on('data', add);
     const timer = setTimeout(() => {
-      out += `\n[dyrygent] przekroczony limit ${timeoutSec} s — przerwane`;
-      // Windows: SIGTERM ubija tylko bash, a jego dzieci (git czekający na logowanie) trzymają potoki i `close` nie przychodzi.
+      out += `\n[conductor] exceeded limit ${timeoutSec} s — interrupted`;
+      // On Windows, SIGTERM kills only Bash; children can retain pipes and prevent close, so terminate the process tree.
       if (IS_WIN && child.pid) spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
       else child.kill('SIGTERM');
     }, timeoutSec * 1000);
@@ -70,29 +63,26 @@ export async function gitOk(repo: string, args: string): Promise<boolean> {
   return (await sh(`git ${args}`, repo, 600)).code === 0;
 }
 
-/** Środowisko bez zmiennych sesji-rodzica, żeby zagnieżdżone sesje nie myślały, że są w cudzym oknie. */
+/** Remove parent-session environment variables so nested sessions do not inherit another session identity. */
 export function cleanEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
   const keep = new Set(['CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX']);
   for (const k of Object.keys(env)) if ((k === 'CLAUDECODE' || k.startsWith('CLAUDE_')) && !keep.has(k)) delete env[k];
-  // Nikt nie odpowie na okno logowania gita (Git Credential Manager) — push ma się nie udać od razu, a nie wisieć godzinę.
+  // Disable interactive Git authentication so an unattended push fails promptly rather than hanging.
   env.GIT_TERMINAL_PROMPT = '0';
   env.GCM_INTERACTIVE = 'never';
   return env;
 }
 
-/**
- * Usuwa katalog, który przestał być worktree (git go wyrejestrował, ale nie skasował: zablokowane pliki albo ścieżki
- * dłuższe niż 260 znaków na Windowsie). Wołać tylko dla katalogów, których git już nie zna.
- */
+/** Remove directories already unregistered by Git but left behind because of locks or Windows path limits. Never call for a registered worktree. */
 export async function removeDirHard(dir: string): Promise<boolean> {
   for (let i = 0; i < 3 && existsSync(dir); i++) {
-    // Node: nie podąża za junction pointami pnpm (lstat) i obsługuje długie ścieżki na Windowsie.
-    // PowerShell 5.1 Remove-Item -Recurse na junctionach pnpm się wykłada — zmierzone 2026-10-03 (35 tys. plików w 19 s).
+    // Node handles Windows long paths and does not follow pnpm junctions when removing directories.
+    // PowerShell 5.1 Remove-Item -Recurse fails on pnpm junctions (observed on 2026-10-03 with 35,000 files).
     try {
       rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 500 });
     } catch {
-      /* zablokowane pliki — dobijemy procesy i spróbujemy jeszcze raz */
+      /* Terminate processes holding locked files, then retry. */
       await killProcessesIn(dir);
     }
     if (existsSync(dir)) await new Promise((r) => setTimeout(r, 5000));
@@ -100,7 +90,7 @@ export async function removeDirHard(dir: string): Promise<boolean> {
   return !existsSync(dir);
 }
 
-/** Semafor: wspólny limit równoległych torów dla bieżącej fali i torów startujących wcześniej. */
+/** Share a concurrency limit across current-wave and early-start tracks. */
 export class Semaphore {
   private queue: (() => void)[] = [];
   constructor(private free: number) {}
@@ -119,21 +109,17 @@ export class Semaphore {
 
 export const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 
-/**
- * Ubija procesy, których katalog roboczy albo wiersz poleceń leży w `dir` — serwery dev i watchery zostawione
- * przez sesję (inaczej zombie trzymają port i pliki, a `git worktree remove` się nie udaje).
- * `lsof -d cwd` zamiast `lsof +D`, bo +D przeszukuje node_modules i trwa minuty.
- */
+/** Terminate processes with working directories or command lines inside dir. This releases server ports and file locks before removing worktrees. Use lsof -d cwd instead of the slow recursive lsof +D. */
 export async function killProcessesIn(dir: string): Promise<number[]> {
   if (IS_WIN) return killProcessesInWin(dir);
   const mine = new Set([process.pid, process.ppid]);
   const pids = new Set<number>();
-  // lsof podaje ścieżkę po rozwiązaniu dowiązań (/var → /private/var, /tmp → /private/tmp) — porównuj obie.
+  // lsof resolves symlinks (/var to /private/var, /tmp to /private/tmp); compare both forms.
   let real = dir;
   try {
     real = realpathSync(dir);
   } catch {
-    /* katalogu już nie ma */
+    /* Directory no longer exists. */
   }
   const inside = (p: string) => [dir, real].some((d) => p === d || p.startsWith(d + '/'));
   const cwd = await sh('lsof -d cwd -Fpn 2>/dev/null', '/', 60, 5_000_000);
@@ -152,20 +138,14 @@ export async function killProcessesIn(dir: string): Promise<number[]> {
   return list;
 }
 
-/**
- * Windowsowy odpowiednik: `lsof -d cwd` nie ma odpowiednika bez dodatkowych narzędzi
- * (katalogu roboczego procesu nie da się odczytać z Win32_Process), więc dopasowujemy
- * po WIERSZU POLECEŃ — obie postacie separatora. To łapie serwery dev i watchery
- * uruchomione ze ścieżką w argumentach; proces odpalony samym `cd` do worktree
- * może zostać. Dlatego dyrygent na Windowsie dokłada ubijanie po porcie toru.
- */
+/** Win32_Process does not expose cwd, so match command lines with either path separator. This may miss processes launched only by cd; also terminate listeners on track ports. */
 async function killProcessesInWin(dir: string): Promise<number[]> {
   const mine = new Set([process.pid, process.ppid]);
   const back = dir.replace(/\//g, '\\');
   const fwd = dir.replace(/\\/g, '/');
   const ps =
     `$a='${back.replace(/'/g, "''")}'.ToLower(); $b='${fwd.replace(/'/g, "''")}'.ToLower(); ` +
-    // Bez samego siebie: wiersz polecenia tego PowerShella (i powłoki, która go woła) też zawiera szukaną ścieżkę.
+    // Exclude this PowerShell process and its parent shell, whose command lines contain the search path.
     `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.ProcessId -ne $PID -and ` +
     `-not $_.CommandLine.Contains('Get-CimInstance') -and ` +
     `($_.CommandLine.ToLower().Contains($a) -or $_.CommandLine.ToLower().Contains($b)) } | ` +
@@ -188,7 +168,7 @@ async function killProcessesInWin(dir: string): Promise<number[]> {
   return list;
 }
 
-/** Ubija to, co słucha na porcie toru — Windowsowe uzupełnienie dopasowania po wierszu poleceń. */
+/** Terminate listeners on the track port, supplementing Windows command-line matching. */
 export async function killPort(port: number): Promise<number[]> {
   if (!IS_WIN) {
     const r = await sh(`lsof -ti tcp:${port} 2>/dev/null || true`, '/', 30);
@@ -210,14 +190,14 @@ export async function killPort(port: number): Promise<number[]> {
   return list;
 }
 
-/** Wolne GB na wolumenie, na którym leży `dir`. */
+/** Return free GB on the volume containing dir. */
 export async function freeGb(dir: string): Promise<number> {
   const r = await sh(`df -k ${q(dir)} | tail -1 | awk '{print $4}'`, '/', 30);
   const kb = Number(r.out.trim());
   return Number.isFinite(kb) ? kb / 1024 / 1024 : Infinity;
 }
 
-/** Prosty mutex: operacje na wspólnym repo (worktree add/remove, gałęzie) po jednej naraz — git trzyma lock. */
+/** Serialize shared repository operations because Git holds locks during worktree and branch changes. */
 export class Mutex {
   private tail: Promise<void> = Promise.resolve();
   run<T>(fn: () => Promise<T>): Promise<T> {

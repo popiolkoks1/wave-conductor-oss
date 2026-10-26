@@ -1,125 +1,137 @@
-# Manifest — pełna specyfikacja
+# Manifest reference
 
-Plik YAML. Ścieżki względne liczą się od katalogu manifestu; `~` działa.
+The manifest is a YAML file. Relative paths resolve from its directory; `~` expands to the user's home directory. `promptFile`, `context` and `mergePromptFile` resolve from `planDir`.
 
-## Pola główne
+## Main fields
 
-| pole | domyślnie | znaczenie |
+| Field | Default | Meaning |
 |---|---|---|
-| `name` | — (wymagane) | nazwa przebiegu (tytuł powiadomień i raportu) |
-| `repo` | — (wymagane) | repo projektu; jego katalog MUSI stać na `mainBranch` — tam dyrygent przewija main `--ff-only` |
-| `planDir` | — (wymagane) | katalog planu; `promptFile`, `context`, `mergePromptFile` liczą się od niego |
-| `mainBranch` | `main` | gałąź, do której wpadają fale |
-| `context` | `[]` | pliki planu, które czyta nadzorca i które każda sesja ma przeczytać na starcie (README, zasady wspólne) |
-| `worktreeRoot` | `<repo>-conductor-wt` | gdzie powstają worktree torów i integracji. Ustaw w katalogu z CLAUDE.md/`.claude` projektu, żeby sesje dziedziczyły reguły |
-| `stateDir` | `.conductor` | stan przebiegów: `<stateDir>/<runId>/` + `current.json` |
-| `sessionCwd` | worktree | katalog startowy sesji (np. katalog z hookami projektu, jak `~/projects`); praca i tak idzie w worktree |
-| `mergePort` | `basePort + 90` | port serwera dev sesji scalającej |
-| `setup` | `[]` | polecenia w każdym nowym worktree (np. `cd frontend && pnpm install --frozen-lockfile`) |
-| `basePort` | `4100` | tor N w fali dostaje port `basePort + N` na serwer dev |
-| `maxParallel` | `4` | ile torów naraz |
-| `maxFixAttempts` | `3` | ile razy sesja dostaje czerwone bramki do poprawy, zanim tor zostanie odłożony |
-| `maxFollowUps` | `4` | ile razy nadzorca może odpowiedzieć sesji, która skończyła pytaniem tekstem |
-| `maxTurns` | — | limit tur jednej sesji |
-| `maxBudgetUsd` | — | limit kosztu jednej sesji (szacunek SDK) |
-| `maxRunBudgetUsd` | — | limit kosztu całego przebiegu; po przekroczeniu nowe tory nie startują, przebieg kończy się raportem |
-| `sessionTimeoutMin` | `240` | sesja dłuższa niż tyle minut zegara jest przerywana i wznawiana z podpowiedzią (zwykle wisi na serwerze dev na pierwszym planie) |
-| `minFreeGb` | `10` | poniżej tylu GB nie powstaje nowy worktree — dyrygent czeka |
-| `mainBusyWaitMin` | `120` | ile czekać na dysk / na katalog repo zajęty inną gałęzią lub zmianami, zanim przebieg się zatrzyma |
-| `settingSources` | `[project, local]` | które ustawienia Claude Code ładują sesje (CLAUDE.md, hooki projektu) |
-| `models` | domyślny | `track`, `supervisor`, `merge`, `judge`, `reviewer` (recenzent pokazu, domyślnie `judge`), `light` (szybki model do oceny „czy sesja skończyła”, domyślnie `supervisor`) — id modeli, np. `claude-opus-5-5` |
-| `requires` | `[]` | narzędzia, które muszą być na PATH (`doctor` sprawdza przed startem), np. `[node, pnpm, make, cargo]` |
-| `review` | — | niezależny recenzent i pokaz projektu — patrz niżej |
-| `earlyPortOffset` | `50` | przesunięcie portów torów startujących wcześniej (`needs`): `basePort + offset + (nr fali % 4) × 10 + nr toru` |
-| `notify` | `{macos: true, heartbeatHours: 6}` | patrz niżej |
-| `policy` | patrz niżej | zakazy i push |
-| `waves` | — (wymagane) | lista fal, wykonywanych po kolei |
+| `name` | required | Run name used in reports and notifications. |
+| `repo` | required | Project Git checkout. With legacy main integration, it must be on `mainBranch`. With `policy.outputBranch`, results use a dedicated checkout. |
+| `planDir` | required | Directory containing task prompts, context and integration prompts. |
+| `mainBranch` | `main` | Starting branch and integration target unless `outputBranch` is set. |
+| `context` | `[]` | Plan files read by the supervisor and each session at startup. |
+| `worktreeRoot` | `<repo>-conductor-wt` | Track and integration worktree directory. Place under a directory providing project CLAUDE.md and `.claude` rules when inheritance is required. |
+| `stateDir` | `.conductor` | Run state under `<stateDir>/<runId>/`, plus `current.json`. |
+| `sessionCwd` | worktree | Session startup directory, for example to load project hooks. Work still happens in the assigned worktree. |
+| `mergePort` | `basePort + 90` | Integration session dev server port. |
+| `setup` | `[]` | Commands run in every new worktree, for example `cd frontend && pnpm install --frozen-lockfile`. |
+| `basePort` | `4100` | Track N in a wave uses port `basePort + N`. |
+| `maxParallel` | `4` | Maximum concurrent tracks; must be a positive integer. |
+| `maxFixAttempts` | `3` | Gate repair attempts before deferring a track. |
+| `maxFollowUps` | `4` | Supervisor replies to sessions ending with plain-text questions. |
+| `maxTurns` | unset | Per-session turn limit. |
+| `maxBudgetUsd` | unset | Estimated SDK cost limit per session. |
+| `maxRunBudgetUsd` | unset | Estimated run cost limit. Once reached, no new tracks start and execution ends with a report. |
+| `sessionTimeoutMin` | `240` | Wall-clock timeout; interrupt and resume the session with guidance. |
+| `minFreeGb` | `10` | Wait rather than create a worktree below this free-space threshold. |
+| `mainBusyWaitMin` | `120` | Maximum wait for disk space or an available main checkout. |
+| `settingSources` | `[project, local]` | Claude Code settings loaded by sessions, including project hooks. |
+| `models` | SDK default | Model IDs for `track`, `supervisor`, `merge`, `judge`, `reviewer` and `light`. Reviewer defaults to judge; light defaults to supervisor. |
+| `requires` | `[]` | Tools required on PATH; checked by doctor, for example `[node, pnpm, make, cargo]`. |
+| `review` | unset | Optional independent visual review; see below. |
+| `earlyPortOffset` | `50` | Early track port offset: `basePort + offset + (wave index % 4) × 10 + track index`. |
+| `notify` | `{macos: true, heartbeatHours: 6}` | Notification channels and heartbeat interval. |
+| `policy` | see below | Push behavior, output branch and restrictions. |
+| `waves` | required | Nonempty list of execution stages. |
 
-## `notify`
+## Notifications
 
-| pole | znaczenie |
+| Field | Meaning |
 |---|---|
-| `macos` | Centrum powiadomień macOS |
-| `ntfy` | temat ntfy.sh — powiadomienie na telefon (aplikacja ntfy, subskrypcja tematu; temat traktuj jak hasło) |
-| `command` | dowolne polecenie; dostaje `$CONDUCTOR_KIND` i `$CONDUCTOR_MESSAGE` (np. webhook Slacka przez curl) |
-| `heartbeatHours` | znak życia, gdy tyle godzin nic nie przyszło; `0` = wyłączone |
+| `macos` | macOS Notification Center. |
+| `ntfy` | ntfy.sh topic for phone notifications. Subscribe in the ntfy app; treat the topic as a secret. |
+| `command` | Custom command receiving `$CONDUCTOR_KIND` and `$CONDUCTOR_MESSAGE`, for example a webhook command. |
+| `heartbeatHours` | Send a heartbeat after this many hours without a notification; `0` disables it. |
 
-Powiadomienia są rzadkie z założenia: **start**, **koniec każdej fali**, **koniec przebiegu** (gotowe albo zatrzymany),
-**problem środowiska** (dysk, zajęty main, długie czekanie na reset limitu, padnięty proces), rzadki **znak życia**.
-Każde trafia też do `<run>/notify.jsonl`, z którego czyta `conduct watch`.
+Notifications are intentionally infrequent: start, completion of each wave, run completion or stop, environment problems (disk space, occupied checkout, rate limit wait, process crash) and occasional heartbeats. Every notification is also saved to `<run>/notify.jsonl`, read by `conduct watch`.
 
-## `policy`
+## Policy
 
-| pole | domyślnie | znaczenie |
+| Field | Default | Meaning |
 |---|---|---|
-| `push` | `false` | `git push origin <main>` po każdej scalonej fali (nigdy `--force`) |
-| `denyBash` | `[]` | dodatkowe wzorce regex zakazanych poleceń (np. `tools/publish`, `deploy`) |
-| `writeRoots` | `[]` | katalogi, w których sesje mogą pisać poza swoim worktree (np. `~/.claude/projects` — pamięć) |
-| `denyPaths` | `[]` | ścieżki względem worktree, do których nie wolno pisać (np. `math/`, `src/types/`) — twardo, hookiem |
+| `push` | `false` | Push the integration target to origin after each merged wave; never force-push. |
+| `outputBranch` | unset | Keep the source branch unchanged. Create this result branch from `mainBranch` in `<worktreeRoot>/_result` and integrate successive waves there. |
+| `denyBash` | `[]` | Additional forbidden shell command regexes, such as `tools/publish` or `deploy`. |
+| `writeRoots` | `[]` | Directories where sessions may write outside their own worktree. |
+| `denyPaths` | `[]` | Paths relative to the worktree blocked by tool hooks, such as `math/` or `src/types/`. |
+| `protectedPaths` | `[]` | Git pathspecs whose committed modifications block task acceptance and integration, including edits made through shell commands. |
 
-## `review` — niezależny recenzent i pokaz
+Use a separate `outputBranch` and `worktreeRoot` for each independent plan. Keep the result checkout for resuming; pre-existing branches outside it are rejected. Push targets the result branch when configured. Existing manifests without `outputBranch` retain main-branch integration.
 
-Pokaz robi DYRYGENT, nie sesja toru: stawia serwer w worktree, czeka na 200, odpala polecenie zrzutów, ubija serwer.
-Recenzent dostaje tylko zrzuty i kryteria — nie czyta raportów ani samooceny torów.
+Commit protected acceptance tests before the run and leave ordinary regression tests editable. Restrictions are guardrails, not an OS security sandbox.
 
-| pole | znaczenie |
+## Visual review
+
+The conductor launches the server in the worktree, waits for HTTP 200, runs the screenshot command and terminates the server. The reviewer receives screenshots and criteria without track reports or self-assessments.
+
+| Field | Meaning |
 |---|---|
-| `serve` | polecenie serwera w worktree, w tle; `{port}` podstawia dyrygent |
-| `ready` | ścieżka sprawdzana, aż odpowie 200 (domyślnie `/`) |
-| `showcase` | polecenie zrzutów; `{url}` i `{out}` podstawia dyrygent; PNG-i w `{out}` (stałe nazwy — strona „przed / po” paruje je po nazwie) |
-| `instructions` | dodatkowy opis roli recenzenta i wymagań projektu; bez narzuconej branży ani estetyki |
-| `criteria` | pliki kryteriów oceny (względem planDir albo absolutne), np. checklista dostępności i wymagania produktu |
-| `judge` | sędzia wariantów ocenia po zrzutach, nie po samoocenie (domyślnie `true`) |
-| `wave` | po scaleniu fali: pokaz + ocena 0–3★; `fix` = jedna runda poprawek sesji scalającej, cofana, jeśli psuje bramki (domyślnie `true`) |
-| `port` | port serwera pokazu (domyślnie `mergePort + 5`) |
+| `serve` | Background server command; the conductor substitutes `{port}`. |
+| `ready` | Readiness path returning HTTP 200; defaults to `/`. |
+| `showcase` | Screenshot command; substitutes `{url}` and `{out}`. Write PNGs with stable names into `{out}` so before/after images can be paired. |
+| `instructions` | Project-specific reviewer role and requirements. No industry or aesthetic is imposed by default. |
+| `criteria` | Criteria files relative to `planDir` or absolute paths, such as product and accessibility checklists. |
+| `judge` | Judge variants using screenshots rather than self-assessments; defaults to `true`. |
+| `wave` | Review after integration, with a 0–3 star rating. A `fix` verdict allows one integration-session repair round, reverted if it breaks gates. Defaults to `true`. |
+| `port` | Showcase server port; defaults to `mergePort + 5`. |
 
-Wynik: `<run>/showcase/<fala>.html` (strona „przed / po” z oceną), gwiazdki w `REPORT.md` i w powiadomieniu po fali.
-`REPORT.md` jest przepisywany na bieżąco (najwyżej co 15 s), z czasem każdego toru i fali.
+Output: `<run>/showcase/<wave>.html`, a before/after page with review. Ratings also appear in REPORT.md and wave notifications. REPORT.md updates during execution, at most every 15 seconds, with track and wave durations. Screenshots do not prove behavior or full accessibility.
 
-## Fala
+## Wave
 
-| pole | znaczenie |
+| Field | Meaning |
 |---|---|
-| `id` | identyfikator (gałąź integracji: `integration/<id>`) |
-| `tracks` | tory; wszystkie startują od `main` po poprzedniej fali |
-| `gates` | bramki odpalane w każdym torze (dokładane do bramek toru) |
-| `integrationGates` | bramki po scaleniu (domyślnie = `gates`) |
-| `mergePromptFile` / `mergePrompt` | prompt scalania; bez niego dyrygent scala sam, a konflikty oddaje sesji |
+| `id` | Wave ID; integration branch is `integration/<id>`. |
+| `tracks` | Tasks normally starting from the result of the previous wave. |
+| `gates` | Checks for every track, in addition to track-specific gates. |
+| `integrationGates` | Checks after merging; defaults to `gates`. |
+| `mergePromptFile` / `mergePrompt` | Optional integration prompt. Without one, the conductor merges automatically and asks a session to resolve conflicts. |
 
-## Tor
+## Track
 
-| pole | znaczenie |
+| Field | Meaning |
 |---|---|
-| `id` | identyfikator, unikalny w całym manifeście |
-| `promptFile` / `prompt` | zadanie sesji |
-| `branch` | nazwa gałęzi (domyślnie `wave/<id>`); zajęta cudzą, nie scaloną pracą → dyrygent weźmie `<branch>-r2` |
-| `base` | inna baza niż `main` |
-| `required` | tor nie przeszedł → przebieg kończy się (zamiast iść dalej bez niego) |
-| `variants` | `[{id, note}]` — każdy wariant w osobnym worktree; sędzia wybiera zwycięzcę; przegrane zostają na gałęziach `<branch>--<id>` |
-| `judgeCriteria` | czym sędzia ma się kierować |
-| `gates` | bramki tylko tego toru |
-| `model` | inny model dla tego toru |
-| `done` | tor zrobiony przed przebiegiem — gałąź (lokalna albo z origin) idzie prosto do scalania, bez sesji. Tak wznawia się plan w połowie |
-| `dir` | nazwa katalogu worktree w `worktreeRoot` (gdy prompt planu podaje konkretny katalog) |
-| `port` | port serwera dev (gdy prompt planu podaje konkretny port) |
-| `denyPaths` | zamrożone ścieżki tylko dla tego toru, dokładane do `policy.denyPaths` (np. tory frontendu bez `math/`) |
-| `needs` | tory z WCZEŚNIEJSZYCH fal, od których ten tor zależy. Gdy wszystkie są zielone (warianty — rozstrzygnięte), tor startuje od razu, jeszcze w trakcie poprzedniej fali, od gałęzi `prestart/<id>` = main + ich gałęzie. Jeśli któraś zależność ostatecznie nie wejdzie do main, tor jest odkładany (nie wniesie jej tylnymi drzwiami). Bez `needs` — czeka na koniec poprzedniej fali |
+| `id` | Track ID, unique across the manifest. |
+| `promptFile` / `prompt` | Task prompt file or inline task. |
+| `branch` | Branch name; defaults to `wave/<id>`. If occupied by unmerged work, a suffix such as `-r2` is used. |
+| `base` | Starting ref other than the integration target. |
+| `required` | Stop the run if this track fails, instead of proceeding without it. |
+| `variants` | `[{id, note}]`; each variant runs in its own worktree. The judge chooses a winner; alternative branches remain as `<branch>--<id>`. |
+| `judgeCriteria` | Criteria for choosing a variant. |
+| `gates` | Track-specific acceptance checks. |
+| `model` | Model override for this track. |
+| `done` | Already-completed local or origin branch. Skip the session and send it to integration. Useful for partially completed plans. |
+| `dir` | Worktree directory name under `worktreeRoot`. |
+| `port` | Explicit dev server port. |
+| `denyPaths` | Additional frozen paths for this track. |
+| `needs` | Track IDs from earlier waves. When dependencies pass and variants are resolved, start early from `prestart/<id>`: current target plus dependency branches. If a dependency is later excluded from integration, defer this track to avoid reintroducing it. Without `needs`, wait for the previous wave. |
 
-## Bramka
+## Gate
 
-| pole | domyślnie | znaczenie |
+| Field | Default | Meaning |
 |---|---|---|
-| `name` | — | nazwa (w raporcie; ta sama nazwa = ta sama bramka przy pomiarze bazowym) |
-| `run` | — | polecenie; zielona = kod 0 |
-| `cwd` | `.` | katalog względem worktree |
-| `runs` / `mustPass` | `1` / `runs` | tłumienie szumu: zielona, gdy `mustPass` z `runs` przebiegów przejdzie |
-| `timeoutSec` | `1800` | limit czasu jednego przebiegu |
-| `baseline` | `true` | tylko bramki fali/integracji: `false` = bramka sprawdza NOWĄ rzecz (cel), więc nie wolno jej mierzyć na main |
+| `name` | required | Report label and baseline comparison identity. `protected-paths` is reserved. |
+| `run` | required | Shell command; exit code 0 passes. |
+| `cwd` | `.` | Directory relative to the worktree. |
+| `runs` / `mustPass` | `1` / `runs` | Repeated checks pass when at least `mustPass` attempts succeed. |
+| `timeoutSec` | `1800` | Timeout per attempt. |
+| `baseline` | `true` | Wave/integration gates only. Set `false` for a new acceptance criterion that cannot pass on the starting branch. |
+| `failuresFile` | unset | Generated JSON array of stable failing test IDs, relative to gate cwd. Enables comparison against baseline failures. |
 
-**Cel czy regresja?** Bramka toru = cel toru (np. „README istnieje”) — zawsze blokuje. Bramka fali/integracji = regresja
-(np. „testy i check zielone”) — mierzona bazowo. Bramka fali, która sprawdza nową rzecz, dostaje `baseline: false`,
-inaczej na main byłaby czerwona i przestałaby cokolwiek pilnować.
+Track gates check task goals and always block. Wave/integration gates normally check regressions and are measured on the clean starting branch before each wave. A new wave-level criterion needs `baseline: false`; otherwise a failing baseline can make it informational.
 
-**Pomiar bazowy:** przed każdą falą dyrygent odpala jej bramki regresji na czystym `main`. Bramka czerwona już tam
-nie blokuje torów w tej fali (tylko informacyjna, oznaczona w raporcie `◌`) — inaczej jeden stary błąd odłożyłby każdy tor.
-Porównanie „nie gorzej niż baza” zapisz jako skrypt, który sam zwraca 0/1.
+Without `failuresFile`, a gate already failing at baseline does not block that wave and is marked `◌`. To compare detailed results yourself, use a script returning 0/1.
+
+With `failuresFile`, the command must freshly write a JSON string array on every invocation, including `[]` on success, and exit nonzero on failed tests. Previously failing IDs are allowed; new failures block. Missing or malformed reports and nonzero exit with an empty failure list fail closed. The report is removed before each invocation; use a dedicated generated file. Comparison depends on stable IDs and a trustworthy adapter; it cannot identify weakened assertions with unchanged IDs. For repeated checks, the last observed failure list is retained as baseline evidence.
+
+## Commands and run artifacts
+
+- `conduct init <manifest> --repo <repo>` creates a starter without overwriting an existing file.
+- `conduct plan <manifest>` previews stages, dependencies, checks, budgets and target without models or test execution.
+- `conduct check <manifest>` validates the plan and prompt paths.
+- `conduct doctor <manifest>` checks prerequisites; `--no-auth` skips its model authentication probe.
+- `conduct run <manifest>` runs in foreground; `start` runs detached.
+- `conduct status <manifest>`, `watch`, `stop` and `start --resume-last` inspect, stop and resume execution.
+
+New runs write decisions to DECISIONS.md. On first write when resuming an older run, a legacy DECYZJE.md is copied into DECISIONS.md so existing context is preserved. Existing logs are not translated retroactively. See the [quickstart](QUICKSTART.md) for examples.

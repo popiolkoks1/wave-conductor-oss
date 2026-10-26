@@ -9,9 +9,9 @@ import { Store } from '../src/state.js';
 import { Notifier } from '../src/notify.js';
 import { Conductor } from '../src/conductor.js';
 
-/** Fala z torami zrobionymi przed przebiegiem: zero sesji modelu — tylko scalanie, bramki, main, sprzątanie. */
-test('tory done: scalanie gotowych gałęzi w kolejności, main przewinięty, cudze gałęzie zostają', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'done spacja-'));
+/** A wave of pre-completed tracks exercises integration, gates, main advancement and cleanup without models. */
+test('pre-completed tracks merge in order, advance main and preserve external branches', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'done space-'));
   const repo = join(root, 'repo');
   mkdirSync(repo);
   const g = (c: string, cwd = repo) => execSync(`git ${c}`, { cwd, stdio: 'pipe' }).toString().trim();
@@ -36,11 +36,11 @@ test('tory done: scalanie gotowych gałęzi w kolejności, main przewinięty, cu
       notify: { macos: false, heartbeatHours: 0 },
       waves: [{
         id: 'wave-2',
-        gates: [{ name: 'pliki', run: 'test -f a.txt' }],
+        gates: [{ name: 'files', run: 'test -f a.txt' }],
         tracks: [
           { id: '2D', branch: 'art/scene-v2', done: true },
           { id: '2A', branch: 'feat/bigwin-v2', done: true },
-          { id: '2X', branch: 'feat/nie-ma', done: true },
+          { id: '2X', branch: 'feat/missing', done: true },
         ],
       }],
     },
@@ -50,12 +50,12 @@ test('tory done: scalanie gotowych gałęzi w kolejności, main przewinięty, cu
   await new Conductor(m, store, new Notifier(m.notify, store.dir, 't')).run();
 
   assert.equal(store.state.outcome, 'done', store.state.stopReason ?? '');
-  assert.ok(existsSync(join(repo, 'art-scene-v2.txt')) && existsSync(join(repo, 'feat-bigwin-v2.txt')), 'obie gałęzie w main');
+  assert.ok(existsSync(join(repo, 'art-scene-v2.txt')) && existsSync(join(repo, 'feat-bigwin-v2.txt')), 'both branches integrated into main');
   assert.equal(store.track('2X').status, 'deferred');
   assert.equal(store.track('2D').status, 'merged');
   const log = g('log --format=%s main');
-  assert.ok(log.indexOf('art/scene-v2') > log.indexOf('feat/bigwin-v2'), 'kolejność scalania z manifestu');
+  assert.ok(log.indexOf('art/scene-v2') > log.indexOf('feat/bigwin-v2'), 'merge order follows the manifest');
   const branches = g("branch --format='%(refname:short)'");
-  assert.match(branches, /art\/scene-v2/, 'gałęzie zrobione poza dyrygentem nie są kasowane');
-  assert.doesNotMatch(branches, /integration\/wave-2/, 'gałąź integracji sprzątnięta');
+  assert.match(branches, /art\/scene-v2/, 'externally created branches are retained');
+  assert.doesNotMatch(branches, /integration\/wave-2/, 'integration branch cleaned up');
 });

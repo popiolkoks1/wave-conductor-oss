@@ -7,7 +7,8 @@
     "test": "node --import tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit",
     "smoke": "bash examples/toy/smoke.sh",
-    "smoke:resilience": "bash examples/toy/smoke-resilience.sh"
+    "smoke:resilience": "bash examples/toy/smoke-resilience.sh",
+    "demo": "tsx scripts/demo.ts"
   },
   "type": "module",
   "dependencies": {

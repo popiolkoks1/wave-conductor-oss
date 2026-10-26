@@ -7,8 +7,8 @@ import { join, resolve } from 'node:path';
 
 const CONDUCT = resolve('bin/conduct');
 
-/** Przebieg zakończony po fali A; właściciel dopisuje falę B do manifestu; wznowienie robi tylko B. */
-test('nowa fala dopisana do manifestu jest wykonywana przy wznowieniu', () => {
+/** Resume a completed run after adding wave B; only the new wave executes. */
+test('resume executes a new wave appended to the manifest', () => {
   const root = mkdtempSync(join(tmpdir(), 'resume-'));
   const repo = join(root, 'repo');
   mkdirSync(repo);
@@ -42,10 +42,10 @@ test('nowa fala dopisana do manifestu jest wykonywana przy wznowieniu', () => {
   assert.equal(r2.status, 0, r2.stderr + r2.stdout);
   const st = JSON.parse(readFileSync(join(root, 'state', runId, 'state.json'), 'utf8'));
   assert.deepEqual(st.waves.map((w: any) => [w.id, w.status]), [['A', 'merged'], ['B', 'merged']]);
-  assert.match(readFileSync(join(root, 'state', runId, 'events.log'), 'utf8'), /nowe fale B dopisane/);
+  assert.match(readFileSync(join(root, 'state', runId, 'events.log'), 'utf8'), /new waves B added/);
   assert.ok(g('log --format=%s main').includes('wave/b1'));
 
-  // usunięcie NIESCALONEJ fali z manifestu = odmowa wznowienia (nie gubimy pracy po cichu)
+  // Reject resume when an unmerged wave is removed from the manifest.
   const sf = join(root, 'state', runId, 'state.json');
   const st2 = JSON.parse(readFileSync(sf, 'utf8'));
   st2.waves[1].status = 'tracks';
@@ -54,5 +54,5 @@ test('nowa fala dopisana do manifestu jest wykonywana przy wznowieniu', () => {
   writeFileSync(mf, manifest(A));
   const r4 = spawnSync(CONDUCT, ['run', mf, '--resume', runId], { encoding: 'utf8' });
   assert.notEqual(r4.status, 0);
-  assert.match(r4.stderr, /nie ma już niescalonych fal z przebiegu: B/);
+  assert.match(r4.stderr, /missing unmerged waves from the run: B/);
 });

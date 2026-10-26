@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runGates, allGreen } from '../src/gates.js';
 
-test('zielona i czerwona bramka', async () => {
+test('passing and failing gates', async () => {
   const r = await runGates([{ name: 'ok', run: 'true' }, { name: 'bad', run: 'echo boom; exit 3' }], tmpdir());
   assert.equal(r[0].ok, true);
   assert.equal(r[1].ok, false);
@@ -13,9 +13,9 @@ test('zielona i czerwona bramka', async () => {
   assert.equal(allGreen(r), false);
 });
 
-test('szum: 2 z 3 wystarczą, przerywa, gdy już przeszło', async () => {
+test('noisy gates accept two of three runs and stop once passing', async () => {
   const d = mkdtempSync(join(tmpdir(), 'gate-'));
-  // licznik w pliku: 1. przebieg czerwony, kolejne zielone
+  // File counter: first run fails, subsequent runs pass.
   writeFileSync(join(d, 'n'), '0');
   const run = 'n=$(cat n); echo $((n+1)) > n; [ "$n" -ge 1 ]';
   const [r] = await runGates([{ name: 'flaky', run, runs: 3, mustPass: 2 }], d);
@@ -23,7 +23,7 @@ test('szum: 2 z 3 wystarczą, przerywa, gdy już przeszło', async () => {
   assert.equal(r.passes, 2);
 });
 
-test('szum: przerywa, gdy nie da się już zdać', async () => {
+test('stop retrying when a gate can no longer pass', async () => {
   const [r] = await runGates([{ name: 'dead', run: 'false', runs: 5, mustPass: 3 }], tmpdir());
   assert.equal(r.ok, false);
   assert.equal(r.passes, 0);

@@ -5,23 +5,19 @@ import { sh, q } from './sh.js';
 export type NotifyKind = 'start' | 'wave' | 'done' | 'stopped' | 'problem' | 'heartbeat';
 
 export interface NotifyConfig {
-  /** Centrum powiadomień macOS (osascript) */
+  /** macOS Notification Center through osascript. */
   macos: boolean;
-  /** temat ntfy.sh — powiadomienie na telefon bez żadnego konta (https://ntfy.sh/<temat>) */
+  /** ntfy.sh topic for phone notifications without an account; treat the topic as a secret. */
   ntfy?: string;
-  /** dowolne polecenie; dostaje treść w $CONDUCTOR_MESSAGE i rodzaj w $CONDUCTOR_KIND */
+  /** Custom command receiving CONDUCTOR_MESSAGE and CONDUCTOR_KIND. */
   command?: string;
-  /** jeśli od ostatniego powiadomienia minęło tyle godzin, a fala wciąż trwa — krótki znak życia; 0 = wyłączone */
+  /** Send a heartbeat after this many hours of silence; 0 disables it. */
   heartbeatHours: number;
 }
 
 export const DEFAULT_NOTIFY: NotifyConfig = { macos: true, heartbeatHours: 6 };
 
-/**
- * Powiadomienia są RZADKIE z założenia: start, koniec każdej fali, koniec przebiegu,
- * problem środowiska (dysk, main zajęty, limit), rzadki znak życia. Nic per tor, nic per decyzja.
- * Każde trafia też do notify.jsonl — z tego pliku czyta sesja Claude, która przebieg uruchomiła.
- */
+/** Notify only on start, wave completion, run completion, environment problems and occasional heartbeats. Every notification is also recorded in notify.jsonl for the launching session. */
 export class Notifier {
   private last = Date.now();
   constructor(private cfg: NotifyConfig, private runDir: string, private title: string) {}
@@ -45,7 +41,7 @@ export class Notifier {
     await Promise.allSettled(jobs);
   }
 
-  /** Wołane okresowo; wysyła znak życia tylko, gdy od dawna było cicho. */
+  /** Send a heartbeat only after a sufficiently long period without notifications. */
   async heartbeat(status: () => string) {
     if (!this.cfg.heartbeatHours) return;
     if (Date.now() - this.last < this.cfg.heartbeatHours * 3600_000) return;

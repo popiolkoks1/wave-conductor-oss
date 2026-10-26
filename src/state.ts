@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, appendFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, appendFileSync, copyFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 export type TrackStatus = 'pending' | 'running' | 'green' | 'deferred' | 'merged' | 'lost-variant';
@@ -16,15 +16,15 @@ export interface TrackState {
   summary?: string;
   reason?: string;
   commits?: number;
-  /** gałąź założona przez ten przebieg (tylko takie dyrygent może skasować po scaleniu) */
+  /** Branch created by this run; only owned branches may be deleted after integration. */
   ownBranch?: boolean;
-  /** `setup` z manifestu przeszedł w tym worktree (przerwany pnpm install = do powtórki) */
+  /** Setup completed in this worktree; interrupted installs must be retried. */
   setupDone?: boolean;
-  /** port serwera dev toru — sprzątanie ubija to, co na nim słucha (Windows nie zna katalogu roboczego procesu) */
+  /** Track dev server port; terminate listeners during cleanup, including on Windows where cwd matching is unavailable. */
   port?: number;
-  /** commit, od którego tor wystartował (main albo prestart/<id>) */
+  /** Commit from which the track started, main or prestart/<id>. */
   baseSha?: string;
-  /** tor wystartował przed końcem poprzedniej fali (needs) */
+  /** Track started early, before the previous wave completed, using needs. */
   early?: boolean;
   startedAt?: string;
   finishedAt?: string;
@@ -35,7 +35,7 @@ export interface WaveReview {
   verdict: 'ok' | 'fix';
   summary: string;
   issues: string[];
-  /** strona HTML z pokazem „przed / po” */
+  /** HTML before/after showcase page. */
   page?: string;
 }
 
@@ -48,15 +48,16 @@ export interface WaveState {
   mergeCommit?: string;
   pushed?: boolean;
   note?: string;
-  /** bramki czerwone już na czystym main przed falą — tylko informacyjne w tej fali */
+  /** Legacy baseline-failing gates, informational for this wave. */
   baselineRed?: string[];
-  /** tory odłożone przy awaryjnym scalaniu po jednym */
+  baselineFailures?: Record<string, string[]>;
+  /** Tracks deferred during fallback integration one at a time. */
   collided?: string[];
-  /** id sesji scalającej — wznowienie scalania po padnięciu procesu */
+  /** Integration session ID for crash recovery. */
   mergeSessionId?: string;
   integrationSetupDone?: boolean;
   review?: WaveReview;
-  /** katalog zrzutów pokazu tej fali (porównanie z następną) */
+  /** Wave screenshot directory for comparison with the next wave. */
   showcaseDir?: string;
   startedAt?: string;
   finishedAt?: string;
@@ -76,17 +77,17 @@ export interface RunState {
   costUsd: number;
 }
 
-/** Stan przebiegu na dysku; każdy zapis atomowy, żeby przerwanie (limit, uśpienie Maca) nie psuło wznowienia. */
+/** Persist run state atomically so interruption, rate limits or sleep do not corrupt recovery. */
 export class Store {
   readonly dir: string;
   state: RunState;
-  /** wołane po każdym zapisie i wpisie do logu (raport na żywo); wyjątki ignorowane */
+  /** Called after each state save and log entry for live reporting; exceptions are ignored. */
   onChange?: () => void;
   private changed() {
     try {
       this.onChange?.();
     } catch {
-      /* raport nie może wywrócić przebiegu */
+      /* Report errors must not interrupt execution. */
     }
   }
 
@@ -96,7 +97,7 @@ export class Store {
     const f = join(this.dir, 'state.json');
     if (existsSync(f)) this.state = JSON.parse(readFileSync(f, 'utf8'));
     else if (init) this.state = init();
-    else throw new Error(`Nie ma przebiegu ${runId} w ${stateDir}`);
+    else throw new Error(`No run found: ${runId} in ${stateDir}`);
     this.save();
   }
 
@@ -129,7 +130,10 @@ export class Store {
 
   decision(entry: string) {
     this.state.decisions++;
-    appendFileSync(join(this.dir, 'DECYZJE.md'), entry + '\n\n');
+    const file = join(this.dir, 'DECISIONS.md');
+    const legacy = join(this.dir, 'DECYZJE.md');
+    if (!existsSync(file) && existsSync(legacy)) copyFileSync(legacy, file);
+    appendFileSync(file, entry + '\n\n');
     this.save();
   }
 
