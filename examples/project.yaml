@@ -1,0 +1,32 @@
+# Copy into your plan directory and adapt commands to your repository.
+name: project-maintenance
+repo: ../my-project
+planDir: .
+mainBranch: main
+maxParallel: 2
+maxBudgetUsd: 5
+maxRunBudgetUsd: 20
+requires: [node, npm]
+setup: [npm ci]
+notify: { macos: false, heartbeatHours: 6 }
+policy:
+  push: false
+  denyBash: ['npm publish', 'deploy-production']
+waves:
+  - id: implementation
+    gates:
+      - { name: tests, run: npm test }
+    tracks:
+      - id: validation
+        required: true
+        prompt: Improve input validation in one public API. Add regression tests. Preserve compatibility and commit your changes.
+      - id: documentation
+        prompt: Improve installation and usage documentation. Check commands against package.json. Commit your changes.
+        gates:
+          - { name: readme, run: 'test -s README.md' }
+  - id: integration-docs
+    gates:
+      - { name: tests, run: npm test }
+    tracks:
+      - id: usage-example
+        prompt: Read the updated API and documentation. Add a runnable usage example consistent with both and commit it.

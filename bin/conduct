@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Uruchamia dyrygenta z dowolnego katalogu.
+DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+exec "$DIR/node_modules/.bin/tsx" "$DIR/src/cli.ts" "$@"
