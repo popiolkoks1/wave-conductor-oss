@@ -17,6 +17,8 @@ export interface Gate {
    * `false` dla bramek, które sprawdzają NOWĄ rzecz (cel), bo na main muszą być czerwone. Bramki toru to zawsze cele.
    */
   baseline?: boolean;
+  /** JSON string array of failing test IDs, relative to gate cwd. */
+  failuresFile?: string;
 }
 
 export interface Variant {
@@ -96,6 +98,10 @@ export interface Policy {
   denyPaths?: string[];
   /** dyrygent robi `git push origin <main>` po każdej scalonej fali (nigdy --force) */
   push?: boolean;
+  /** Keep main untouched; run in a dedicated checkout on this branch. */
+  outputBranch?: string;
+  /** Git pathspecs checked after sessions, including shell-based edits. */
+  protectedPaths?: string[];
 }
 
 export interface Models {
@@ -202,6 +208,8 @@ export function normalizeManifest(raw: any, baseDir: string): Manifest {
       writeRoots: (raw.policy?.writeRoots ?? []).map((p: string) => abs(baseDir, p)),
       denyPaths: raw.policy?.denyPaths ?? [],
       push: raw.policy?.push ?? false,
+      outputBranch: raw.policy?.outputBranch,
+      protectedPaths: raw.policy?.protectedPaths ?? [],
     },
     requires: raw.requires ?? [],
     review: raw.review,
@@ -212,6 +220,9 @@ export function normalizeManifest(raw: any, baseDir: string): Manifest {
   if (m.review?.instructions !== undefined && typeof m.review.instructions !== 'string') errors.push('review.instructions musi być tekstem');
   if (m.review && (!m.review.serve || !m.review.showcase)) errors.push('review wymaga serve i showcase');
 
+  if (!Number.isInteger(m.maxParallel) || m.maxParallel < 1) errors.push('maxParallel must be a positive integer');
+  if (m.policy.outputBranch && !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(m.policy.outputBranch)) errors.push('invalid outputBranch');
+  if (m.policy.outputBranch === m.mainBranch) errors.push('outputBranch must differ from mainBranch');
   const ids = new Set<string>();
   if (!Array.isArray(m.waves) || m.waves.length === 0) errors.push('waves musi być niepustą listą');
   for (const w of m.waves ?? []) {
@@ -238,7 +249,9 @@ export function normalizeManifest(raw: any, baseDir: string): Manifest {
 }
 
 function checkGate(g: Gate, where: string, errors: string[]) {
+  if (g.name === 'protected-paths') errors.push(`${where}: protected-paths is reserved`);
   if (!g.name || !g.run) errors.push(`${where}: bramka wymaga name i run`);
+  if (g.failuresFile && (isAbsolute(g.failuresFile) || g.failuresFile.split(/[\\/]/).includes('..'))) errors.push(`${where}: failuresFile must stay inside gate cwd`);
   const runs = g.runs ?? 1;
   const must = g.mustPass ?? runs;
   if (must > runs || must < 1) errors.push(`${where}/${g.name}: mustPass musi być w 1..runs`);

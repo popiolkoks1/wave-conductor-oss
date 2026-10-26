@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import { baselineGatesOf, branchOf, mergePromptOf, trackPrompt, type Gate, type Manifest, type Track, type Variant, type Wave } from './manifest.js';
+import { protectedChanges } from './protection.js';
 import { allGreen, describeGates, failureReport, runGates, type GateResult } from './gates.js';
 import type { Notifier } from './notify.js';
 import { runSession, sleep, type SessionOutcome, type SessionSpec } from './session.js';
@@ -238,7 +239,8 @@ export class Conductor {
       if (gates.length) {
         this.log(`[${wave.id}] pomiar bazowy bramek na ${this.m.mainBranch}`);
         const base0 = await runGates(gates, iwt);
-        ws.baselineRed = base0.filter((r) => !r.ok).map((r) => r.name);
+        ws.baselineRed = base0.filter((r) => !r.ok && !gates.find((g) => g.name === r.name)?.failuresFile).map((r) => r.name);
+        ws.baselineFailures = Object.fromEntries(base0.filter((r) => r.failures).map((r) => [r.name, r.failures!]));
         if (ws.baselineRed.length) this.log(`[${wave.id}] czerwone już na ${this.m.mainBranch} (w tej fali tylko informacyjne): ${ws.baselineRed.join(', ')}`);
       }
       await killProcessesIn(iwt);
@@ -411,8 +413,9 @@ Pracujesz BEZ człowieka. Właściciel oddał decyzje; odpowiada za niego nadzor
         await talk(`Dyrygent: w worktree zostały niezacommitowane zmiany:\n${dirty.slice(0, 2000)}\nZacommituj to, co jest częścią pracy (ścieżki jawnie), a śmieci dopisz do .gitignore albo usuń. Worktree ma być czysty.`);
         continue;
       }
-      const results = await runGates(gates, st.worktree);
+      const results = await runGates(gates, st.worktree, ws.baselineFailures);
       await killProcessesIn(st.worktree);
+      results.push(...await protectedChanges(st.worktree, st.baseSha ?? base, this.m.policy.protectedPaths ?? []));
       st.reason = describeGates(results, baselineRed);
       this.store.save();
       if (allGreen(results, baselineRed)) break;
@@ -604,7 +607,8 @@ Na końcu: worktree czysty, krótki raport scalenia.
       const miss = await notIn(list);
       const merging = existsSync(join(await git(iwt, 'rev-parse --absolute-git-dir'), 'MERGE_HEAD'));
       const dirty = (await sh('git status --porcelain', iwt)).out.trim();
-      const results: GateResult[] = miss.length || merging || dirty ? [] : await runGates(gates, iwt);
+      const results: GateResult[] = miss.length || merging || dirty ? [] : await runGates(gates, iwt, ws.baselineFailures);
+      results.push(...await protectedChanges(iwt, this.store.state.startMain, this.m.policy.protectedPaths ?? []));
       await killProcessesIn(iwt);
       const problems = [
         miss.length ? `Nie scalone gałęzie: ${miss.map((s) => s.branch).join(', ')}.` : '',
@@ -768,7 +772,8 @@ Na końcu: worktree czysty, krótki raport scalenia.
           // Ktoś ruszył main w trakcie fali: dociągnij go do integracji i sprawdź bramki jeszcze raz.
           this.log(`[${wave.id}] ${main} się ruszył — dociągam do integracji`);
           const mm = await sh(`git merge --no-edit ${q(main)}`, iwt);
-          const again = await runGates(gates, iwt);
+          const again = await runGates(gates, iwt, ws.baselineFailures);
+          again.push(...await protectedChanges(iwt, this.store.state.startMain, this.m.policy.protectedPaths ?? []));
           await killProcessesIn(iwt);
           if (mm.code !== 0 || !allGreen(again, baselineRed)) {
             await sh('git merge --abort', iwt);

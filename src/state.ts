@@ -50,6 +50,7 @@ export interface WaveState {
   note?: string;
   /** bramki czerwone już na czystym main przed falą — tylko informacyjne w tej fali */
   baselineRed?: string[];
+  baselineFailures?: Record<string, string[]>;
   /** tory odłożone przy awaryjnym scalaniu po jednym */
   collided?: string[];
   /** id sesji scalającej — wznowienie scalania po padnięciu procesu */

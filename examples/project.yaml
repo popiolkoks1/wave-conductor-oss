@@ -10,6 +10,8 @@ requires: [node, npm]
 setup: [npm ci]
 notify: { macos: false, heartbeatHours: 6 }
 policy:
+  outputBranch: conductor/project-maintenance
+  protectedPaths: [] # e.g. acceptance/ and scripts/check-tests.mjs
   push: false
   denyBash: ['npm publish', 'deploy-production']
 waves:

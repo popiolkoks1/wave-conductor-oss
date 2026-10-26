@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { initPlan, describePlan, prepareOutput } from './onboarding.js';
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -13,6 +14,8 @@ import { Store } from './state.js';
 
 const USAGE = `wave-conductor — autonomiczny przebieg fal planu
 
+  conduct init <manifest.yaml> [--repo PATH]                   create a starter plan
+  conduct plan <manifest.yaml>                                 preview execution without agents
   conduct doctor <manifest.yaml> [--no-auth] [--test-notify]   sprawdza wszystko, co może wywrócić przebieg
   conduct start  <manifest.yaml> [--resume-last]                przebieg w tle (przeżyje zamknięcie terminala)
   conduct stop   <manifest.yaml>                                zatrzymuje przebieg w tle (da się wznowić)
@@ -60,7 +63,14 @@ const newRunId = () => new Date().toISOString().replace(/[:.]/g, '-').slice(0, 1
 async function main() {
   const [cmd, file, ...rest] = process.argv.slice(2);
   if (!cmd || !file) return console.log(USAGE);
+  if (cmd === 'init') {
+    const i = rest.indexOf('--repo');
+    console.log(await initPlan(file, i >= 0 ? rest[i + 1] : process.cwd()));
+    return;
+  }
   const m = loadManifest(file);
+  if (cmd === 'plan') return console.log(describePlan(m));
+  if (['run', 'start'].includes(cmd)) await prepareOutput(m);
 
   switch (cmd) {
     case 'check': {

@@ -27,6 +27,10 @@ export function writeReport(m: Manifest, store: Store): string {
   L.push(`- decyzje nadzorcy: **${s.decisions}** (pełna lista: \`DECYZJE.md\`)`);
   L.push(`- szacowany koszt: $${s.costUsd.toFixed(2)}`, '');
 
+  const tracks = Object.values(s.tracks);
+  L.push(`- running: ${tracks.filter(t => t.status === 'running').length}; integrated: ${tracks.filter(t => t.status === 'merged').length}; deferred: ${tracks.filter(t => t.status === 'deferred').length}`);
+  L.push(`- result branch: ${m.policy.outputBranch ?? m.mainBranch}`);
+  L.push(`- next action: ${s.outcome === 'stopped' ? 'Read the stop reason, fix it, then resume with --resume-last.' : s.outcome === 'done' ? 'Review the result diff and any deferred tasks.' : 'Use conduct status to inspect progress.'}`, '');
   for (const w of s.waves) {
     const wm = minsBetween(w.startedAt, w.finishedAt);
     L.push(`## Fala ${w.id} — ${w.status}${w.pushed ? ' (wypchnięta)' : ''}${wm !== undefined ? ` · ${wm} min` : ''}`);
@@ -51,7 +55,7 @@ export function writeReport(m: Manifest, store: Store): string {
 
   const left = Object.values(s.tracks).filter((t) => ['deferred', 'lost-variant', 'green'].includes(t.status));
   L.push('## Do obejrzenia ręcznie', '');
-  if (left.length === 0) L.push('Nic — każdy tor jest w gałęzi głównej.');
+  if (left.length === 0) L.push(`Brak odłożonych torów. Gałąź wyniku: ${m.policy.outputBranch ?? m.mainBranch}.`);
   for (const t of left) L.push(`- \`${t.branch}\` (${LABEL[t.status]}) — ${(t.reason ?? '').split('\n')[0].slice(0, 200)}`);
   if (left.length) L.push('', 'Każda gałąź z tej listy zostaje w repo; worktree usunięto, jeśli był czysty.');
   L.push('', 'Logi sesji: `sessions/*.jsonl`, przebieg w czasie: `events.log`.');

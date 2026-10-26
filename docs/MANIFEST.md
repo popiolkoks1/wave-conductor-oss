@@ -123,3 +123,13 @@ inaczej na main byłaby czerwona i przestałaby cokolwiek pilnować.
 **Pomiar bazowy:** przed każdą falą dyrygent odpala jej bramki regresji na czystym `main`. Bramka czerwona już tam
 nie blokuje torów w tej fali (tylko informacyjna, oznaczona w raporcie `◌`) — inaczej jeden stary błąd odłożyłby każdy tor.
 Porównanie „nie gorzej niż baza” zapisz jako skrypt, który sam zwraca 0/1.
+
+## Rozszerzenia: onboarding i kontrola wyników
+
+- `conduct init <manifest> --repo <repo>` tworzy plan bez nadpisywania istniejącego pliku.
+- `conduct plan <manifest>` pokazuje fale, zależności, bramki, budżety i gałąź wyniku bez uruchamiania modeli.
+- `policy.outputBranch`: wynik na osobnej gałęzi i w worktree `_result`; źródłowy main pozostaje bez zmian. Brak pola zachowuje dotychczasowe zachowanie. Osobny plan powinien mieć własne outputBranch i worktreeRoot.
+- `policy.protectedPaths`: lista pathspeców Git, których zmiana w commitach blokuje integrację. Nadaje się do wcześniej zapisanych testów akceptacyjnych.
+- `gate.failuresFile`: świeży plik JSON z tablicą identyfikatorów nieudanych testów, względem cwd bramki. Nowe porażki względem pomiaru bazowego blokują. Brak lub zły format raportu również blokuje. Polecenie musi zwrócić kod niezerowy przy porażkach i zapisać `[]` przy sukcesie.
+
+Przykłady i ograniczenia: [English quickstart](QUICKSTART.md).
